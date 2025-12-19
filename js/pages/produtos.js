@@ -103,15 +103,32 @@ async function toggleProdutoAtivo(id, ativo) {
 ========================= */
 async function addCategoria(nome, grade_id) {
   const payload = { nome: nome.trim(), grade_id };
+
   const { data, error } = await sb
     .from("categorias")
     .insert([payload])
     .select("id,nome,grade_id")
     .single();
 
-  if (error) throw error;
-  return data;
+  if (!error) return data;
+
+  // Se já existir (duplicado), busca e retorna a existente
+  const msg = (error.message || "").toLowerCase();
+  if (msg.includes("duplicate") || msg.includes("unique")) {
+    const { data: exist, error: err2 } = await sb
+      .from("categorias")
+      .select("id,nome,grade_id")
+      .ilike("nome", payload.nome)
+      .limit(1)
+      .maybeSingle();
+
+    if (err2) throw err2;
+    if (exist) return exist;
+  }
+
+  throw error;
 }
+
 
 /* =========================
    CORES
