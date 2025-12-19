@@ -528,7 +528,7 @@ function bindEvents() {
 
 export async function renderProdutos() {
   try {
-    state.grades = await loadGrades();
+    console.log("GRADES:", state.grades);
     state.categorias = await loadCategorias();
 
     const html = `
