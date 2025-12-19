@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JEANS E CIA | Gestão</title>
+  <link rel="stylesheet" href="./assets/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">J</div>
+        <div class="brand-text">
+          <div class="brand-title">JEANS E CIA</div>
+          <div class="brand-sub">Gestão interna</div>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-route="dashboard">📊 Dashboard</button>
+        <button class="nav-item" data-route="produtos">🏷️ Produtos</button>
+        <button class="nav-item" data-route="estoque">📦 Estoque</button>
+        <button class="nav-item" data-route="compras">🧾 Compras</button>
+        <button class="nav-item" data-route="vendas">🛒 Vendas</button>
+        <button class="nav-item" data-route="crediario">💳 Crediário</button>
+      </nav>
+
+      <div class="sidebar-actions">
+        <button class="btn ghost" id="btnBackup">Exportar Backup</button>
+        <button class="btn danger" id="btnLogout">Sair</button>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+      <!-- TOPBAR -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <h1 id="pageTitle">Dashboard</h1>
+          <div class="breadcrumbs" id="breadcrumbs">Visão geral</div>
+        </div>
+
+        <div class="topbar-right">
+          <div class="search">
+            <input id="globalSearch" type="text" placeholder="Buscar por código, produto, cor..." />
+            <button class="btn" id="btnSearch">Buscar</button>
+          </div>
+          <button class="btn primary" id="btnNovaVenda">+ Nova Venda</button>
+        </div>
+      </header>
+
+      <!-- CONTENT -->
+      <section class="content" id="appContent"></section>
+
+      <!-- FOOTER FIXO -->
+      <footer class="footer">
+        JEANS E CIA — CNPJ: 00.900.243/0001-86
+      </footer>
+    </main>
+  </div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
