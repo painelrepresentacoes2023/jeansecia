@@ -351,3 +351,25 @@ body{
   opacity: 1 !important;
 }
 
+/* Corrigir aparência apagada dos selects */
+select,
+.select {
+  opacity: 1 !important;
+  filter: none !important;
+  color: #eaf1ff !important;
+  background-color: rgba(255,255,255,0.06);
+}
+
+/* Opções do dropdown */
+select option {
+  color: #111 !important;
+  background: #fff !important;
+}
+
+/* Apenas quando REALMENTE estiver desabilitado */
+select:disabled,
+.select:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed;
+}
+
