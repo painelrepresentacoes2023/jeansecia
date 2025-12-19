@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Login | JEANS E CIA</title>
+  <link rel="stylesheet" href="./assets/styles.css" />
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="login-brand">
+        <div class="login-mark">J</div>
+        <div>
+          <div class="login-title">JEANS E CIA</div>
+          <div class="login-sub">Acesso restrito (Admin)</div>
+        </div>
+      </div>
+
+      <form id="loginForm" class="login-form">
+        <label class="lbl">E-mail</label>
+        <input class="inp" id="email" type="email" placeholder="seuemail@dominio.com" required />
+
+        <label class="lbl">Senha</label>
+        <input class="inp" id="password" type="password" placeholder="••••••••" required />
+
+        <button class="btn primary" type="submit">Entrar</button>
+        <div id="msg" class="login-msg"></div>
+      </form>
+
+      <div class="login-foot">
+        JEANS E CIA — CNPJ: 00.900.243/0001-86
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./js/login.js"></script>
+</body>
+</html>
