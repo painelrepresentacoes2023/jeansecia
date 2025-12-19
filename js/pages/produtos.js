@@ -427,9 +427,10 @@ function bindEvents() {
       msg.textContent = "Categoria criada!";
       setTimeout(() => closeCatModal(), 350);
     } catch (e) {
-      msg.textContent = "Erro ao criar categoria (talvez já exista).";
-      console.error(e);
-    }
+  console.error("ERRO ADD CATEGORIA:", e);
+  msg.textContent = e?.message || "Erro ao criar categoria.";
+}
+
   });
 
   // salvar produto
