@@ -2,6 +2,7 @@ import { sb } from "../supabase.js";
 
 const state = {
   categorias: [],
+  grades: [],
   produtos: [],
   editingId: null,
   selectedProdutoId: null,
@@ -21,10 +22,24 @@ function escapeHtml(s="") {
     .replaceAll("'","&#039;");
 }
 
+/* =========================
+   LOADERS
+========================= */
+async function loadGrades() {
+  const { data, error } = await sb
+    .from("grades")
+    .select("id,nome,ativo")
+    .eq("ativo", true)
+    .order("nome", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
 async function loadCategorias() {
   const { data, error } = await sb
     .from("categorias")
-    .select("id,nome")
+    .select("id,nome,grade_id,ativo")
     .eq("ativo", true)
     .order("nome", { ascending: true });
 
@@ -33,7 +48,6 @@ async function loadCategorias() {
 }
 
 async function loadProdutos(search="") {
-  // lista produtos com categoria (join)
   let q = sb
     .from("produtos")
     .select("id,codigo,nome,ativo,categoria_id,categorias(nome)")
@@ -57,6 +71,9 @@ async function loadProdutos(search="") {
   }));
 }
 
+/* =========================
+   PRODUTOS CRUD
+========================= */
 async function saveProduto({ id, codigo, nome, categoria_id, ativo=true }) {
   const payload = { codigo, nome, categoria_id, ativo };
   if (id) {
@@ -75,6 +92,24 @@ async function toggleProdutoAtivo(id, ativo) {
   if (error) throw error;
 }
 
+/* =========================
+   CATEGORIAS (Add)
+========================= */
+async function addCategoria(nome, grade_id) {
+  const payload = { nome: nome.trim(), grade_id };
+  const { data, error } = await sb
+    .from("categorias")
+    .insert([payload])
+    .select("id,nome,grade_id")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+/* =========================
+   CORES
+========================= */
 async function loadCores(produtoId) {
   if (!produtoId) return [];
   const { data, error } = await sb
@@ -99,6 +134,9 @@ async function removeCor(corId) {
   if (error) throw error;
 }
 
+/* =========================
+   UI RENDER
+========================= */
 function renderListaProdutos() {
   return `
     <div class="card">
@@ -135,6 +173,7 @@ function renderListaProdutos() {
 
 function renderFormProduto() {
   const catOptions = state.categorias.map(c => opt(c.id, c.nome)).join("");
+
   return `
     <div class="card">
       <div class="card-title">${state.editingId ? "Editar Produto" : "Novo Produto"}</div>
@@ -148,14 +187,18 @@ function renderFormProduto() {
       <div style="margin-top:10px; display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
         <div class="field">
           <label>Código</label>
-          <input class="input" id="fCodigo" placeholder="Ex: 1023" />
+          <input class="input" id="fCodigo" placeholder="Ex: PAL-001" />
         </div>
+
         <div class="field">
           <label>Categoria</label>
-          <select class="select" id="fCategoria">
-            <option value="">Selecione</option>
-            ${catOptions}
-          </select>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <select class="select" id="fCategoria" style="flex:1;">
+              <option value="">Selecione</option>
+              ${catOptions}
+            </select>
+            <button class="icon-btn" id="btnAddCategoria" title="Adicionar categoria">+ Add</button>
+          </div>
         </div>
       </div>
 
@@ -180,6 +223,39 @@ function renderFormProduto() {
         ${state.selectedProdutoId ? `<span class="small">Carregando cores...</span>` : `<span class="small">Salve um produto para liberar as cores.</span>`}
       </div>
     </div>
+
+    <!-- MINI MODAL: Add Categoria -->
+    <div class="modal-overlay" id="catModal">
+      <div class="modal">
+        <div class="modal-head">
+          <div class="modal-title">Adicionar Categoria</div>
+          <button class="icon-btn" id="catClose">✕</button>
+        </div>
+
+        <div class="field">
+          <label>Nome da categoria</label>
+          <input class="input" id="catNome" placeholder="Ex: Bermuda, Blusa, Calcinha..." />
+        </div>
+
+        <div class="field" style="margin-top:10px;">
+          <label>Grade de tamanhos</label>
+          <select class="select" id="catGrade">
+            <option value="">Selecione a grade</option>
+            ${state.grades.map(g => opt(g.id, g.nome)).join("")}
+          </select>
+          <div class="small" style="margin-top:6px;">
+            Dica: “Grade Camisa” para P/M/G… e “Grade Numérica” para 36–50.
+          </div>
+        </div>
+
+        <div class="inline-actions">
+          <button class="btn" id="catCancelar">Cancelar</button>
+          <button class="btn primary" id="catSalvar">Concluído</button>
+        </div>
+
+        <div class="small" id="catMsg" style="margin-top:10px;"></div>
+      </div>
+    </div>
   `;
 }
 
@@ -189,14 +265,12 @@ function renderProdutoRow(p) {
     : `<span class="badge low">● Inativo</span>`;
 
   return `
-    <tr data-id="${p.id}" class="pRow" style="cursor:pointer;">
+    <tr data-id="${p.id}" style="cursor:pointer;">
       <td>${escapeHtml(p.nome)}</td>
       <td>${escapeHtml(p.codigo)}</td>
       <td>${escapeHtml(p.categoria_nome)}</td>
       <td>${status}</td>
-      <td>
-        <button class="btn" data-action="editar" data-id="${p.id}">Editar</button>
-      </td>
+      <td><button class="btn" data-action="editar" data-id="${p.id}">Editar</button></td>
     </tr>
   `;
 }
@@ -212,15 +286,9 @@ function fillFormProduto(p) {
   const btnDes = document.getElementById("btnDesativarProduto");
   const btnAtv = document.getElementById("btnAtivarProduto");
 
-  if (p.ativo) {
-    btnDes.style.display = "inline-flex";
-    btnAtv.style.display = "none";
-  } else {
-    btnDes.style.display = "none";
-    btnAtv.style.display = "inline-flex";
-  }
+  if (p.ativo) { btnDes.style.display = "inline-flex"; btnAtv.style.display = "none"; }
+  else { btnDes.style.display = "none"; btnAtv.style.display = "inline-flex"; }
 
-  // habilita cores
   document.getElementById("fCor").disabled = false;
   document.getElementById("btnAddCor").disabled = false;
 }
@@ -270,7 +338,6 @@ async function refreshCores() {
     </span>
   `).join("");
 
-  // bind remover
   wrap.querySelectorAll("button[data-corid]").forEach(btn => {
     btn.addEventListener("click", async () => {
       try {
@@ -284,6 +351,34 @@ async function refreshCores() {
   });
 }
 
+/* =========================
+   MODAL CATEGORIA
+========================= */
+function openCatModal() {
+  document.getElementById("catMsg").textContent = "";
+  document.getElementById("catNome").value = "";
+  document.getElementById("catGrade").value = "";
+  document.getElementById("catModal").style.display = "flex";
+  document.getElementById("catNome").focus();
+}
+function closeCatModal() {
+  document.getElementById("catModal").style.display = "none";
+}
+
+async function reloadCategoriasAndSelect(categoriaId) {
+  state.categorias = await loadCategorias();
+
+  const sel = document.getElementById("fCategoria");
+  sel.innerHTML =
+    `<option value="">Selecione</option>` +
+    state.categorias.map(c => opt(c.id, c.nome)).join("");
+
+  if (categoriaId) sel.value = categoriaId;
+}
+
+/* =========================
+   EVENTS
+========================= */
 function bindEvents() {
   document.getElementById("btnNovoProduto").addEventListener("click", () => resetForm());
 
@@ -299,6 +394,37 @@ function bindEvents() {
     }
   });
 
+  // Abrir modal categoria
+  document.getElementById("btnAddCategoria").addEventListener("click", () => openCatModal());
+  document.getElementById("catClose").addEventListener("click", () => closeCatModal());
+  document.getElementById("catCancelar").addEventListener("click", () => closeCatModal());
+  document.getElementById("catModal").addEventListener("click", (e) => {
+    if (e.target.id === "catModal") closeCatModal();
+  });
+
+  // Salvar categoria
+  document.getElementById("catSalvar").addEventListener("click", async () => {
+    const msg = document.getElementById("catMsg");
+    msg.textContent = "Salvando...";
+    try {
+      const nome = document.getElementById("catNome").value.trim();
+      const grade_id = document.getElementById("catGrade").value;
+
+      if (!nome) return (msg.textContent = "Digite o nome da categoria.");
+      if (!grade_id) return (msg.textContent = "Selecione a grade de tamanhos.");
+
+      const cat = await addCategoria(nome, grade_id);
+      await reloadCategoriasAndSelect(cat.id);
+
+      msg.textContent = "Categoria criada!";
+      setTimeout(() => closeCatModal(), 350);
+    } catch (e) {
+      msg.textContent = "Erro ao criar categoria (talvez já exista).";
+      console.error(e);
+    }
+  });
+
+  // salvar produto
   document.getElementById("btnSalvarProduto").addEventListener("click", async () => {
     try {
       const nome = document.getElementById("fNome").value.trim();
@@ -317,7 +443,6 @@ function bindEvents() {
 
       await refreshLista(document.getElementById("pSearch").value || "");
 
-      // seleciona/ativa área de cores
       const produto = state.produtos.find(x => x.id === id) || { id, nome, codigo, categoria_id, ativo:true, categoria_nome:"-" };
       fillFormProduto(produto);
       await refreshCores();
@@ -369,7 +494,7 @@ function bindEvents() {
     }
   });
 
-  // clique na linha -> editar
+  // editar ao clicar na lista
   document.getElementById("pTbody").addEventListener("click", async (e) => {
     const btn = e.target.closest("button[data-action='editar']");
     const tr = e.target.closest("tr[data-id]");
@@ -385,6 +510,8 @@ function bindEvents() {
 }
 
 export async function renderProdutos() {
+  // carregar grades e categorias
+  state.grades = await loadGrades();
   state.categorias = await loadCategorias();
 
   const html = `
@@ -398,7 +525,6 @@ export async function renderProdutos() {
     try {
       bindEvents();
       await refreshLista("");
-      // deixa form limpo
       resetForm();
     } catch (e) {
       alert("Erro ao carregar Produtos. Verifique tabelas/policies.");
