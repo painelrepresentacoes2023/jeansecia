@@ -26,16 +26,12 @@ const els = {
 async function requireAuth() {
   const { data } = await sb.auth.getSession();
   if (!data.session) {
-    // se você tiver tela de login separada, redireciona.
-    // por enquanto só avisa:
-    els.content.innerHTML = `<div class="card">
-      <div class="card-title">Sessão expirada</div>
-      <div class="card-sub">Faça login novamente.</div>
-    </div>`;
+    location.href = "./login.html";
     return false;
   }
   return true;
 }
+
 
 function setActive(route) {
   els.navItems.forEach(b => b.classList.toggle("active", b.dataset.route === route));
