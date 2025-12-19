@@ -192,12 +192,14 @@ function renderFormProduto() {
 
         <div class="field">
           <label>Categoria</label>
-          <div style="display:flex; gap:8px; align-items:center;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <select class="select" id="fCategoria" style="flex:1;">
               <option value="">Selecione</option>
               ${catOptions}
             </select>
-            <button class="icon-btn" id="btnAddCategoria" title="Adicionar categoria">+ Add</button>
+            <button class="btn" id="btnAddCategoria" title="Adicionar categoria" style="white-space:nowrap;">
+  + Add Categoria
+</button>
           </div>
         </div>
       </div>
