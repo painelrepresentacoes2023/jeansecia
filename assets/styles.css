@@ -281,3 +281,25 @@ body{
 .small{color:var(--muted); font-size:12px}
 .right{display:flex; gap:10px; align-items:center; justify-content:flex-end}
 
+/* ===== Produtos ===== */
+.row2{display:grid; grid-template-columns: 420px 1fr; gap:14px;}
+@media (max-width: 1100px){ .row2{grid-template-columns:1fr;} }
+
+.chips{display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;}
+.chip{
+  display:inline-flex; align-items:center; gap:8px;
+  padding:8px 10px; border-radius:999px;
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  font-size:12px;
+}
+.chip button{
+  border:0; background:transparent; color:var(--muted);
+  cursor:pointer; font-size:14px; line-height:1;
+}
+.chip button:hover{color:#ffb4b4}
+
+.form-actions{display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;}
+.hr{height:1px; background:var(--line); margin:12px 0;}
+
