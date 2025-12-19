@@ -473,7 +473,7 @@ function bindEvents() {
       fillFormProduto(produto);
       await refreshCores();
 
-      alert("Produto salvo com sucesso.");
+      
     } catch (e) {
       alert("Erro ao salvar produto. Se o código já existir, troque o código.");
       console.error(e);
