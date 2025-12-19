@@ -28,19 +28,18 @@ function escapeHtml(s="") {
 async function loadGrades() {
   const { data, error } = await sb
     .from("grades")
-    .select("*");
-
-  console.log("GRADES_RAW:", data, "ERR:", error);
+    .select("*")
+    .order("created_at", { ascending: true });
 
   if (error) throw error;
 
-  return (data || []).map(g => ({
-    id: g.id,
-    nome: g.nome ?? g.descricao ?? g.titulo ?? g.tipo ?? g.label ?? "Grade"
-  }));
+  return (data || [])
+    .filter(g => g.ativo !== false)
+    .map(g => ({
+      id: g.id,
+      nome: g.nome ?? g.descricao ?? g.titulo ?? g.tipo ?? g.label ?? "Grade"
+    }));
 }
-
-
 
 
 async function loadCategorias() {
