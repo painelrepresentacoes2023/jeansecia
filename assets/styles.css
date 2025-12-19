@@ -346,3 +346,8 @@ body{
 .modal select option {
   color: #0f172a;
 }
+
+.modal .select, .modal select {
+  opacity: 1 !important;
+}
+
