@@ -303,3 +303,37 @@ body{
 .form-actions{display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;}
 .hr{height:1px; background:var(--line); margin:12px 0;}
 
+/* ===== Modal simples (mini janela suspensa) ===== */
+.modal-overlay{
+  position:fixed; inset:0;
+  background:rgba(0,0,0,.55);
+  display:none;
+  align-items:center;
+  justify-content:center;
+  z-index:9999;
+  padding:18px;
+}
+.modal{
+  width:min(520px, 100%);
+  border:1px solid var(--line);
+  background:rgba(16,31,58,.92);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+  padding:14px;
+}
+.modal-head{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:10px;
+  margin-bottom:10px;
+}
+.modal-title{font-weight:900}
+.icon-btn{
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.04);
+  color:var(--text);
+  border-radius:12px;
+  padding:8px 10px;
+  cursor:pointer;
+}
+.icon-btn:hover{background:rgba(255,255,255,.08)}
+.inline-actions{display:flex; gap:10px; justify-content:flex-end; margin-top:12px; flex-wrap:wrap;}
