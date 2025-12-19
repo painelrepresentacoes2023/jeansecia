@@ -28,16 +28,18 @@ function escapeHtml(s="") {
 async function loadGrades() {
   const { data, error } = await sb
     .from("grades")
-    .select("id,descricao,ativo")
-    .eq("ativo", true)
-    .order("descricao", { ascending: true });
+    .select("*")
+    .order("created_at", { ascending: true });
 
   if (error) throw error;
 
-  return (data || []).map(g => ({
-    id: g.id,
-    nome: g.descricao
-  }));
+  // Normaliza: tenta achar o campo de nome em qualquer coluna comum
+  return (data || [])
+    .filter(g => g.ativo !== false)
+    .map(g => ({
+      id: g.id,
+      nome: g.nome ?? g.descricao ?? g.titulo ?? g.tipo ?? "Grade"
+    }));
 }
 
 
