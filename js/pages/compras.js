@@ -391,21 +391,36 @@ function renderItens() {
 // B) Se você tiver uma RPC (recomendado) que já faz tudo: compra + itens + estoque
 
 async function salvarCompraNoBanco(payload) {
-  // ✅ OPÇÃO B (RECOMENDADO): RPC que registra compra e atualiza estoque
-  // Ex: rpc("registrar_compra", { p_data, p_fornecedor, p_obs, p_itens })
-  //
-  // Se você AINDA não tem essa RPC, me fala que eu te mando o SQL certinho.
+  // 1) cria a compra
+  const { data: compra, error: e1 } = await sb
+    .from("compras")
+    .insert([{
+      data: payload.data,
+      fornecedor: payload.fornecedor || null,
+      observacoes: payload.observacoes || null,
+      // owner_id fica automático (default auth.uid())
+    }])
+    .select("id")
+    .single();
 
-  const { data, error } = await sb.rpc("registrar_compra", {
-    p_data: payload.data,
-    p_fornecedor: payload.fornecedor || null,
-    p_observacoes: payload.observacoes || null,
-    p_itens: payload.itens
-  });
+  if (e1) throw e1;
 
-  if (error) throw error;
-  return data;
+  // 2) cria os itens (ATENÇÃO: coluna é "quantidade", não "qtd")
+  const itensDb = payload.itens.map(it => ({
+    compra_id: compra.id,
+    produto_id: it.produto_id,
+    cor: it.cor,
+    tamanho: it.tamanho,
+    quantidade: it.qtd,      // <- seu payload vem "qtd"
+    custo_unit: it.custo_unit
+  }));
+
+  const { error: e2 } = await sb.from("compra_itens").insert(itensDb);
+  if (e2) throw e2;
+
+  return compra.id;
 }
+
 
 /* =========================
    BIND EVENTS
