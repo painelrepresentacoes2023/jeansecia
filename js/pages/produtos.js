@@ -519,8 +519,11 @@ function bindEvents() {
 
 export async function renderProdutos() {
   try {
-    console.log("GRADES:", state.grades);
+    // 1) carrega grades e categorias antes de montar o HTML
+    state.grades = await loadGrades();
     state.categorias = await loadCategorias();
+
+    console.log("GRADES:", state.grades);
 
     const html = `
       <div class="row2">
@@ -552,4 +555,5 @@ export async function renderProdutos() {
     `;
   }
 }
+
 
