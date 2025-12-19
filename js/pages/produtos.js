@@ -28,13 +28,18 @@ function escapeHtml(s="") {
 async function loadGrades() {
   const { data, error } = await sb
     .from("grades")
-    .select("id,nome,ativo")
+    .select("id,descricao,ativo")
     .eq("ativo", true)
-    .order("nome", { ascending: true });
+    .order("descricao", { ascending: true });
 
   if (error) throw error;
-  return data || [];
+
+  return (data || []).map(g => ({
+    id: g.id,
+    nome: g.descricao
+  }));
 }
+
 
 async function loadCategorias() {
   const { data, error } = await sb
