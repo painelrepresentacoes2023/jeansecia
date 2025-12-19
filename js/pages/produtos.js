@@ -33,14 +33,22 @@ async function loadGrades() {
 
   if (error) throw error;
 
-  // Normaliza: tenta achar o campo de nome em qualquer coluna comum
   return (data || [])
     .filter(g => g.ativo !== false)
-    .map(g => ({
-      id: g.id,
-      nome: g.nome ?? g.descricao ?? g.titulo ?? g.tipo ?? "Grade"
-    }));
+    .map(g => {
+      const label =
+        g.nome ??
+        g.descricao ??
+        g.titulo ??
+        g.tipo ??
+        g.label ??
+        g.nome_grade ??
+        "Grade";
+
+      return { id: g.id, nome: String(label) };
+    });
 }
+
 
 
 async function loadCategorias() {
