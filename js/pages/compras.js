@@ -103,7 +103,7 @@ function getTamanhosByGradeNome(gradeNome = "") {
    UI
 ========================= */
 
-function renderCompras() {
+function renderComprasLayout() {
   return `
     <div class="row2">
       <div class="card">
@@ -548,7 +548,7 @@ function bind() {
 
 export async function renderCompras() {
   try {
-    const html = renderCompras();
+    const html = renderComprasLayout();
 
     setTimeout(async () => {
       try {
