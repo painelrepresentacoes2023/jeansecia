@@ -519,27 +519,38 @@ function bindEvents() {
 }
 
 export async function renderProdutos() {
-  // carregar grades e categorias
-  state.grades = await loadGrades();
-  state.categorias = await loadCategorias();
+  try {
+    state.grades = await loadGrades();
+    state.categorias = await loadCategorias();
 
-  const html = `
-    <div class="row2">
-      ${renderFormProduto()}
-      ${renderListaProdutos()}
-    </div>
-  `;
+    const html = `
+      <div class="row2">
+        ${renderFormProduto()}
+        ${renderListaProdutos()}
+      </div>
+    `;
 
-  setTimeout(async () => {
-    try {
-      bindEvents();
-      await refreshLista("");
-      resetForm();
-    } catch (e) {
-      alert("Erro ao carregar Produtos. Verifique tabelas/policies.");
-      console.error(e);
-    }
-  }, 0);
+    setTimeout(async () => {
+      try {
+        bindEvents();
+        await refreshLista("");
+        resetForm();
+      } catch (e) {
+        console.error(e);
+        alert("Erro interno ao iniciar a tela Produtos.");
+      }
+    }, 0);
 
-  return html;
+    return html;
+
+  } catch (e) {
+    console.error(e);
+    return `
+      <div class="card">
+        <div class="card-title">Produtos</div>
+        <div class="card-sub">Erro ao carregar esta tela. Abra o Console (F12) para ver o motivo.</div>
+      </div>
+    `;
+  }
 }
+
