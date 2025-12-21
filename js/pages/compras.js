@@ -1,3 +1,10 @@
+function showToast(msg, type = "info") {
+  // fallback: não quebra o sistema se não existir toast global
+  console.log(`[${type}] ${msg}`);
+  const el = document.getElementById("cMsg");
+  if (el) el.textContent = msg;
+}
+
 import { sb } from "../supabase.js";
 
 const SIZES_CAMISA = ["P", "M", "G", "GG", "XG", "LG"];
@@ -257,7 +264,7 @@ function renderComprasLayout() {
         <div class="card-sub">Clique em uma compra para ver itens e editar.</div>
 
         <div class="small" id="hInfo" style="margin-top:10px;">Carregando...</div>
-
+        <div id="hItensBox" class="small" style="margin-top:10px;"></div>
         <div class="table-wrap" style="margin-top:10px;">
           <table class="table">
             <thead>
@@ -522,16 +529,60 @@ async function reloadHistorico() {
 }
 
 async function verItensCompra(compraId) {
+  const box = document.getElementById("hItensBox");
+  if (box) box.textContent = "Carregando itens...";
+
   try {
     const itens = await loadCompraItens(compraId);
-    // feedback simples no toast, e log completo no console
-    console.table(itens);
-    showToast(`Itens da compra: ${itens.length} registro(s). (veja no console)`, "success");
+
+    if (!itens.length) {
+      if (box) box.textContent = "Nenhum item nessa compra.";
+      return;
+    }
+
+    const html = `
+      <div class="card" style="margin-top:10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <div style="font-weight:700;">Itens da compra</div>
+          <button class="btn" id="btnFecharItens">Fechar</button>
+        </div>
+        <div class="table-wrap" style="margin-top:10px;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Produto</th><th>Cor</th><th>Tam</th><th>Qtd</th><th>Custo</th><th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${itens.map(i => `
+                <tr>
+                  <td>${escapeHtml(i.produto || "-")} <span class="small">(${escapeHtml(i.codigo_produto || "")})</span></td>
+                  <td>${escapeHtml(i.cor || "-")}</td>
+                  <td>${escapeHtml(i.tamanho || "-")}</td>
+                  <td>${Number(i.quantidade || 0)}</td>
+                  <td>${money(i.custo_unit || 0)}</td>
+                  <td>${money((Number(i.quantidade || 0) * Number(i.custo_unit || 0)))}</td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    if (box) box.innerHTML = html;
+
+    const btn = document.getElementById("btnFecharItens");
+    if (btn) btn.addEventListener("click", () => {
+      if (box) box.innerHTML = "";
+    });
+
   } catch (e) {
     console.error(e);
-    showToast("Erro ao carregar itens da compra.", "error");
+    if (box) box.textContent = "Erro ao carregar itens da compra.";
   }
 }
+
 
 /* =========================
    EDITAR COMPRA
