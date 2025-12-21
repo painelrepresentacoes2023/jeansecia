@@ -71,6 +71,32 @@ async function loadProdutosComGrade() {
   });
 }
 
+async function loadHistoricoCompras() {
+  const { data, error } = await sb
+    .from("vw_compras_resumo")
+    .select("*")
+    .order("data", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function loadCompraItens(compra_id) {
+  const { data, error } = await sb
+    .from("vw_compra_itens_detalhe")
+    .select("*")
+    .eq("compra_id", compra_id)
+    .order("produto", { ascending: true })
+    .order("cor", { ascending: true })
+    .order("tamanho", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+
 async function loadCoresDoProduto(produtoId) {
   if (!produtoId) return [];
   if (state.produtoCores.has(produtoId)) return state.produtoCores.get(produtoId);
@@ -390,15 +416,13 @@ function renderItens() {
 // A) Se você tiver tabelas "compras" + "compras_itens" e "estoque"
 // B) Se você tiver uma RPC (recomendado) que já faz tudo: compra + itens + estoque
 
-async function salvarCompraNoBanco(payload) {
-  // payload esperado:
-  // { data, fornecedor, observacoes, itens: [{ produto_id, cor, tamanho, qtd, custo_unit }] }
-
+async function salvarCompra(payload, compra_id = null) {
   const payloadRpc = {
+    compra_id: compra_id || undefined,
     data: payload.data,
     fornecedor: payload.fornecedor || null,
     observacoes: payload.observacoes || null,
-    itens: (payload.itens || []).map(it => ({
+    itens: payload.itens.map(it => ({
       produto_id: it.produto_id,
       cor: it.cor,
       tamanho: it.tamanho,
@@ -407,10 +431,15 @@ async function salvarCompraNoBanco(payload) {
     })),
   };
 
-  const { error } = await sb.rpc("registrar_compra", { payload: payloadRpc });
-  if (error) throw error;
-
-  return true;
+  if (compra_id) {
+    const { error } = await sb.rpc("atualizar_compra", { payload: payloadRpc });
+    if (error) throw error;
+    showToast("Compra atualizada com sucesso.", "success");
+  } else {
+    const { error } = await sb.rpc("registrar_compra", { payload: payloadRpc });
+    if (error) throw error;
+    showToast("Compra salva com sucesso.", "success");
+  }
 }
 
 
