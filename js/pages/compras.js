@@ -746,50 +746,168 @@ function setModoEdicao(on) {
   }
 }
 
+function openEditorCompra(compra, itens) {
+  const box = document.getElementById("hItensBox");
+  if (!box) return;
+
+  // cópia editável local (sem mexer no carrinho)
+  const draft = (itens || []).map((i, idx) => ({
+    _idx: idx,
+    produto_id: i.produto_id,
+    produto: i.produto || "",
+    codigo: i.codigo_produto || "",
+    cor: i.cor || "",
+    tamanho: i.tamanho || "",
+    qtd: Number(i.quantidade || 0),
+    custo_unit: Number(i.custo_unit || 0),
+  }));
+
+  const moneyLocal = (n) => Number(n || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+
+  function render() {
+    const total = draft.reduce((s, x) => s + (Number(x.qtd || 0) * Number(x.custo_unit || 0)), 0);
+    const pecas = draft.reduce((s, x) => s + Number(x.qtd || 0), 0);
+
+    box.innerHTML = `
+      <div class="card" style="margin-top:10px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+          <div>
+            <div style="font-weight:800; font-size:16px;">Editar compra</div>
+            <div class="small">Data: ${escapeHtml(fmtDateBR(compra.data))} • Fornecedor: ${escapeHtml(compra.fornecedor || "-")}</div>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn" id="btnFecharEditorCompra">Fechar</button>
+            <button class="btn primary" id="btnSalvarEditorCompra">Atualizar compra</button>
+          </div>
+        </div>
+
+        <div class="small" style="margin-top:8px;" id="editorCompraMsg"></div>
+
+        <div class="table-wrap" style="margin-top:10px;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Produto</th>
+                <th>Cor</th>
+                <th>Tam</th>
+                <th style="width:90px;">Qtd</th>
+                <th style="width:140px;">Custo unit</th>
+                <th>Total</th>
+                <th style="width:120px;">Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${draft.map((x, i) => {
+                const lineTotal = Number(x.qtd||0) * Number(x.custo_unit||0);
+                return `
+                  <tr data-row="${i}">
+                    <td>${escapeHtml(x.produto)} <span class="small">(${escapeHtml(x.codigo)})</span></td>
+                    <td>${escapeHtml(x.cor)}</td>
+                    <td>${escapeHtml(x.tamanho)}</td>
+                    <td>
+                      <input class="input" style="min-width:70px;" type="number" min="0" step="1" value="${Number(x.qtd || 0)}" data-qtd="${i}">
+                    </td>
+                    <td>
+                      <input class="input" style="min-width:110px;" type="text" value="${String(Number(x.custo_unit||0)).replace(".", ",")}" data-custo="${i}">
+                    </td>
+                    <td>${moneyLocal(lineTotal)}</td>
+                    <td>
+                      <button class="btn danger" data-rm="${i}">Remover</button>
+                    </td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="small" style="margin-top:10px;">
+          Peças: <b>${pecas}</b> • Total: <b>${moneyLocal(total)}</b>
+        </div>
+      </div>
+    `;
+
+    // binds: editar qtd
+    box.querySelectorAll("input[data-qtd]").forEach(inp => {
+      inp.addEventListener("input", () => {
+        const i = Number(inp.dataset.qtd);
+        draft[i].qtd = Math.max(0, Number(inp.value || 0));
+        render();
+      });
+    });
+
+    // binds: editar custo
+    box.querySelectorAll("input[data-custo]").forEach(inp => {
+      inp.addEventListener("input", () => {
+        const i = Number(inp.dataset.custo);
+        const v = parseNumberBR(inp.value);
+        draft[i].custo_unit = Number.isFinite(v) ? v : 0;
+        render();
+      });
+    });
+
+    // binds: remover
+    box.querySelectorAll("button[data-rm]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const i = Number(btn.dataset.rm);
+        draft.splice(i, 1);
+        render();
+      });
+    });
+
+    // fechar
+    const btnClose = document.getElementById("btnFecharEditorCompra");
+    if (btnClose) btnClose.addEventListener("click", () => (box.innerHTML = ""));
+
+    // salvar atualização
+    const btnSave = document.getElementById("btnSalvarEditorCompra");
+    if (btnSave) btnSave.addEventListener("click", async () => {
+      const msg = document.getElementById("editorCompraMsg");
+      if (msg) msg.textContent = "Atualizando compra...";
+
+      try {
+        // valida mínimo
+        if (!draft.length) throw new Error("A compra não pode ficar sem itens. Remova menos ou feche sem salvar.");
+
+        const payload = {
+          data: compra.data,
+          fornecedor: compra.fornecedor || "",
+          observacoes: null,
+          itens: draft.map(x => ({
+            produto_id: x.produto_id,
+            cor: x.cor,
+            tamanho: x.tamanho,
+            qtd: Number(x.qtd || 0),
+            custo_unit: Number(x.custo_unit || 0),
+          })),
+        };
+
+        await salvarCompra(payload, compra.compra_id);
+
+        if (msg) msg.textContent = "Compra atualizada ✅";
+        await reloadHistorico();
+        setTimeout(() => { box.innerHTML = ""; }, 600);
+
+      } catch (e) {
+        console.error(e);
+        if (msg) msg.textContent = e?.message || "Erro ao atualizar compra.";
+      }
+    });
+  }
+
+  render();
+}
+
 async function editarCompra(compraId) {
   try {
     const compra = state.historico.find(x => x.compra_id === compraId);
-    if (!compra) {
-      showToast("Compra não encontrada no histórico.", "error");
-      return;
-    }
+    if (!compra) return showToast("Compra não encontrada.", "error");
 
     const itens = await loadCompraItens(compraId);
-
-    state.editCompraId = compraId;
-    setModoEdicao(true);
-
-    document.getElementById("cData").value = compra.data || "";
-    document.getElementById("cFornecedor").value = compra.fornecedor || "";
-
-    // joga itens da compra no carrinho (editável)
-    state.itens = (itens || []).map(i => ({
-      produto_id: i.produto_id,
-      produto_nome: i.produto,
-      produto_codigo: i.codigo_produto,
-      cor: i.cor,
-      tamanho: i.tamanho,
-      qtd: Number(i.quantidade || 0),
-      custo_unit: Number(i.custo_unit || 0),
-
-      // extras pra facilitar edição do item
-      categoria_id: i.categoria_id || null,
-      categoria_nome: i.categoria || "-",
-      grade_nome: i.grade_nome || "",
-    }));
-
-    renderItens();
-    clearItemFields(false);
-
-    const msg = document.getElementById("cMsg");
-    if (msg) msg.textContent = "Compra carregada para edição. Você pode editar/remover itens e salvar.";
-
-    showToast("Compra carregada para edição.", "success");
+    openEditorCompra(compra, itens);
   } catch (e) {
     console.error(e);
-    const msg = document.getElementById("cMsg");
-    if (msg) msg.textContent = "Erro ao abrir compra para edição.";
-    showToast("Erro ao abrir compra para edição.", "error");
+    showToast("Erro ao abrir editor da compra.", "error");
   }
 }
 
