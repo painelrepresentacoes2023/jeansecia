@@ -16,6 +16,9 @@ const state = {
   produtoCores: new Map(),   // produto_id -> ["Azul", "Preto"...]
   itens: [],                 // itens da compra (carrinho)
 
+window.__comprasState = state;
+
+  
   // edição
   editCompraId: null,
   historico: [],
