@@ -253,7 +253,7 @@ function initEstoqueEvents() {
     try {
       await applyFilters();
     } catch (e) {
-      alert("Erro ao carregar estoque. Verifique RLS e a view vw_estoque_detalhado.");
+      showToast("Erro ao carregar estoque.", "error");
       console.error(e);
     }
   });
