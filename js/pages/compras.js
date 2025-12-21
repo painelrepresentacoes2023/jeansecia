@@ -17,7 +17,7 @@ const state = {
   itens: [],                 // itens da compra (carrinho)
 
 window.__comprasState = state;
-
+console.log("compras.js carregou ✅", window.__comprasState);
   
   // edição
   editCompraId: null,
