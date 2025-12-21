@@ -1,3 +1,4 @@
+let editingCompraId = null;
 function showToast(msg, type = "info") {
   // fallback: não quebra o sistema se não existir toast global
   console.log(`[${type}] ${msg}`);
@@ -627,24 +628,30 @@ async function editarCompra(compraId) {
 
     // transforma itens da view em itens do carrinho
     state.itens = (itens || []).map(i => ({
-      produto_id: i.produto_id,
-      produto_nome: i.produto,
-      produto_codigo: i.codigo_produto,
-      cor: i.cor,
-      tamanho: i.tamanho,
-      qtd: Number(i.quantidade || 0),
-      custo_unit: Number(i.custo_unit || 0),
-    }));
+  item_id: i.item_id || i.compra_item_id || i.id || null, // 👈 precisa vir da VIEW
+  produto_id: i.produto_id,
+  produto_nome: i.produto,
+  produto_codigo: i.codigo_produto,
+  cor: i.cor,
+  tamanho: i.tamanho,
+  qtd: Number(i.quantidade || 0),
+  custo_unit: Number(i.custo_unit || 0),
+}));
+
 
     renderItens();
 
     // limpa seleção do item (pra adicionar novos)
     clearItemFields(false);
 
-    showToast("Compra carregada para edição.", "success");
+    const msg = document.getElementById("cMsg");
+if (msg) msg.textContent = "Compra carregada para edição.";
+
   } catch (e) {
     console.error(e);
-    showToast("Erro ao abrir compra para edição.", "error");
+    const msg = document.getElementById("cMsg");
+if (msg) msg.textContent = "Erro ao abrir compra para edição.";
+
   }
 }
 
