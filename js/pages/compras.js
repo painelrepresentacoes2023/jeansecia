@@ -1,12 +1,13 @@
+import { sb } from "../supabase.js";
+
 let editingCompraId = null;
+
 function showToast(msg, type = "info") {
   // fallback: não quebra o sistema se não existir toast global
   console.log(`[${type}] ${msg}`);
   const el = document.getElementById("cMsg");
   if (el) el.textContent = msg;
 }
-
-import { sb } from "../supabase.js";
 
 const SIZES_CAMISA = ["P", "M", "G", "GG", "XG", "LG"];
 const SIZES_NUM = ["36", "38", "40", "42", "44", "46", "50"];
@@ -16,6 +17,12 @@ const state = {
   produtoCores: new Map(),   // produto_id -> ["Azul", "Preto"...]
   itens: [],                 // itens da compra (carrinho)
 
+  // edição
+  editCompraId: null,
+  historico: [],
+};
+
+// ✅ expõe pro console (fora do objeto!)
 window.__comprasState = state;
 console.log("compras.js carregou ✅", window.__comprasState);
   
