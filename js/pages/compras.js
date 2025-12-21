@@ -7,6 +7,10 @@ const state = {
   produtos: [],              // {id, nome, codigo, categoria_id, categoria_nome, grade_id, grade_nome}
   produtoCores: new Map(),   // produto_id -> ["Azul", "Preto"...]
   itens: [],                 // itens da compra (carrinho)
+
+  // edição
+  editCompraId: null,
+  historico: [],
 };
 
 function escapeHtml(s = "") {
@@ -24,7 +28,6 @@ function money(n) {
 }
 
 function parseNumberBR(v) {
-  // aceita 12,50 ou 12.50
   if (v == null) return 0;
   const s = String(v).trim().replace(/\./g, "").replace(",", ".");
   const n = Number(s);
@@ -35,13 +38,18 @@ function opt(value, label) {
   return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
 }
 
+function fmtDateBR(isoDate) {
+  if (!isoDate) return "-";
+  const [y,m,d] = String(isoDate).split("-");
+  if (!y || !m || !d) return isoDate;
+  return `${d}/${m}/${y}`;
+}
+
 /* =========================
    LOADERS
 ========================= */
 
 async function loadProdutosComGrade() {
-  // puxa produto + categoria + grade
-  // ajuste o select conforme seu schema real
   const { data, error } = await sb
     .from("produtos")
     .select(`
@@ -77,7 +85,7 @@ async function loadHistoricoCompras() {
     .select("*")
     .order("data", { ascending: false })
     .order("created_at", { ascending: false })
-    .limit(50);
+    .limit(80);
 
   if (error) throw error;
   return data || [];
@@ -95,7 +103,6 @@ async function loadCompraItens(compra_id) {
   if (error) throw error;
   return data || [];
 }
-
 
 async function loadCoresDoProduto(produtoId) {
   if (!produtoId) return [];
@@ -121,7 +128,6 @@ async function loadCoresDoProduto(produtoId) {
 function getTamanhosByGradeNome(gradeNome = "") {
   const g = gradeNome.toLowerCase();
   if (g.includes("num")) return SIZES_NUM;
-  // padrão: camisa
   return SIZES_CAMISA;
 }
 
@@ -133,8 +139,8 @@ function renderComprasLayout() {
   return `
     <div class="row2">
       <div class="card">
-        <div class="card-title">Nova Compra</div>
-        <div class="card-sub">Registre entradas no estoque e custos. Você pode adicionar vários itens no mesmo lançamento.</div>
+        <div class="card-title" id="tituloCompra">Nova Compra</div>
+        <div class="card-sub" id="subCompra">Registre entradas no estoque e custos. Você pode adicionar vários itens no mesmo lançamento.</div>
 
         <div class="grid grid-2" style="margin-top:12px; gap:10px;">
           <div class="field">
@@ -238,14 +244,36 @@ function renderComprasLayout() {
 
         <div style="margin-top:12px; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
           <div class="small" id="cResumo"></div>
-          <button class="btn primary" id="btnSalvarCompra" disabled>Salvar compra</button>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap;">
+            <button class="btn" id="btnCancelarEdicao" style="display:none;">Cancelar edição</button>
+            <button class="btn primary" id="btnSalvarCompra" disabled>Salvar compra</button>
+          </div>
         </div>
       </div>
 
       <div class="card">
-        <div class="card-title">Histórico (em breve)</div>
-        <div class="card-sub">Depois que salvarmos compras, vamos listar aqui com filtro por período e detalhes.</div>
-        <div class="small" style="margin-top:10px;">(Vamos fazer após fechar o fluxo de salvar compra + atualizar estoque.)</div>
+        <div class="card-title">Histórico de Compras</div>
+        <div class="card-sub">Clique em uma compra para ver itens e editar.</div>
+
+        <div class="small" id="hInfo" style="margin-top:10px;">Carregando...</div>
+
+        <div class="table-wrap" style="margin-top:10px;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Fornecedor</th>
+                <th>Peças</th>
+                <th>Total</th>
+                <th style="width:160px;">Ações</th>
+              </tr>
+            </thead>
+            <tbody id="hTbody">
+              <tr><td colspan="5" class="small">Carregando...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   `;
@@ -288,7 +316,6 @@ async function selectProduto(p) {
   document.getElementById("cProdSearch").value = `${p.nome} (${p.codigo})`;
   document.getElementById("cCategoriaView").value = p.categoria_nome || "-";
 
-  // habilita campos
   document.getElementById("cCor").disabled = false;
   document.getElementById("cTam").disabled = false;
   document.getElementById("cQtd").disabled = false;
@@ -297,12 +324,10 @@ async function selectProduto(p) {
   document.getElementById("btnAddItem").disabled = false;
   document.getElementById("btnLimparItem").disabled = false;
 
-  // carrega cores do produto
   const cores = await loadCoresDoProduto(p.id);
   const corSel = document.getElementById("cCor");
   corSel.innerHTML = `<option value="">Selecione</option>` + cores.map(c => opt(c, c)).join("");
 
-  // tamanhos conforme grade
   const tamanhos = getTamanhosByGradeNome(p.grade_nome || "");
   const tamSel = document.getElementById("cTam");
   tamSel.innerHTML = `<option value="">Selecione</option>` + tamanhos.map(t => opt(t, t)).join("");
@@ -311,8 +336,10 @@ async function selectProduto(p) {
 }
 
 function clearItemFields(keepProduto = true) {
-  document.getElementById("cMsg").textContent = "";
-  document.getElementById("cCalcInfo").textContent = "";
+  const msg = document.getElementById("cMsg");
+  if (msg) msg.textContent = "";
+  const calc = document.getElementById("cCalcInfo");
+  if (calc) calc.textContent = "";
 
   if (!keepProduto) {
     selectedProduto = null;
@@ -407,14 +434,8 @@ function renderItens() {
 }
 
 /* =========================
-   SALVAR COMPRA (placeholder)
+   RPC SALVAR / EDITAR
 ========================= */
-
-// ⚠️ Aqui você liga no seu schema.
-// Eu deixei duas opções:
-//
-// A) Se você tiver tabelas "compras" + "compras_itens" e "estoque"
-// B) Se você tiver uma RPC (recomendado) que já faz tudo: compra + itens + estoque
 
 async function salvarCompra(payload, compra_id = null) {
   const payloadRpc = {
@@ -442,7 +463,157 @@ async function salvarCompra(payload, compra_id = null) {
   }
 }
 
+/* =========================
+   HISTÓRICO UI
+========================= */
 
+function renderHistoricoTable() {
+  const info = document.getElementById("hInfo");
+  const tbody = document.getElementById("hTbody");
+
+  const rows = state.historico || [];
+  info.textContent = `${rows.length} compra(s) no histórico.`;
+
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="5" class="small">Nenhuma compra encontrada.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td>${fmtDateBR(r.data)}</td>
+      <td>${escapeHtml(r.fornecedor || "-")}</td>
+      <td>${Number(r.total_pecas || 0)}</td>
+      <td>${money(r.total_itens || 0)}</td>
+      <td style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn" data-ver="${r.compra_id}">Ver itens</button>
+        <button class="btn primary" data-editar="${r.compra_id}">Editar</button>
+      </td>
+    </tr>
+  `).join("");
+
+  tbody.querySelectorAll("button[data-ver]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.ver;
+      await verItensCompra(id);
+    });
+  });
+
+  tbody.querySelectorAll("button[data-editar]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.editar;
+      await editarCompra(id);
+    });
+  });
+}
+
+async function reloadHistorico() {
+  try {
+    state.historico = await loadHistoricoCompras();
+    renderHistoricoTable();
+  } catch (e) {
+    console.error(e);
+    const info = document.getElementById("hInfo");
+    const tbody = document.getElementById("hTbody");
+    if (info) info.textContent = "Erro ao carregar histórico.";
+    if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="small">Erro ao carregar histórico.</td></tr>`;
+    showToast("Erro ao carregar histórico de compras.", "error");
+  }
+}
+
+async function verItensCompra(compraId) {
+  try {
+    const itens = await loadCompraItens(compraId);
+    // feedback simples no toast, e log completo no console
+    console.table(itens);
+    showToast(`Itens da compra: ${itens.length} registro(s). (veja no console)`, "success");
+  } catch (e) {
+    console.error(e);
+    showToast("Erro ao carregar itens da compra.", "error");
+  }
+}
+
+/* =========================
+   EDITAR COMPRA
+========================= */
+
+function setModoEdicao(on) {
+  const titulo = document.getElementById("tituloCompra");
+  const sub = document.getElementById("subCompra");
+  const btn = document.getElementById("btnSalvarCompra");
+  const btnCancel = document.getElementById("btnCancelarEdicao");
+
+  if (on) {
+    titulo.textContent = "Editar Compra";
+    sub.textContent = "Você está editando uma compra existente. Ao salvar, o estoque será recalculado corretamente.";
+    btn.textContent = "Atualizar compra";
+    btnCancel.style.display = "inline-flex";
+  } else {
+    titulo.textContent = "Nova Compra";
+    sub.textContent = "Registre entradas no estoque e custos. Você pode adicionar vários itens no mesmo lançamento.";
+    btn.textContent = "Salvar compra";
+    btnCancel.style.display = "none";
+  }
+}
+
+async function editarCompra(compraId) {
+  try {
+    const compra = state.historico.find(x => x.compra_id === compraId);
+    if (!compra) {
+      showToast("Compra não encontrada no histórico.", "error");
+      return;
+    }
+
+    const itens = await loadCompraItens(compraId);
+
+    // seta modo edição
+    state.editCompraId = compraId;
+    setModoEdicao(true);
+
+    // preenche cabeçalho
+    document.getElementById("cData").value = compra.data || "";
+    document.getElementById("cFornecedor").value = compra.fornecedor || "";
+
+    // transforma itens da view em itens do carrinho
+    state.itens = (itens || []).map(i => ({
+      produto_id: i.produto_id,
+      produto_nome: i.produto,
+      produto_codigo: i.codigo_produto,
+      cor: i.cor,
+      tamanho: i.tamanho,
+      qtd: Number(i.quantidade || 0),
+      custo_unit: Number(i.custo_unit || 0),
+    }));
+
+    renderItens();
+
+    // limpa seleção do item (pra adicionar novos)
+    clearItemFields(false);
+
+    showToast("Compra carregada para edição.", "success");
+  } catch (e) {
+    console.error(e);
+    showToast("Erro ao abrir compra para edição.", "error");
+  }
+}
+
+function cancelarEdicao() {
+  state.editCompraId = null;
+  state.itens = [];
+  renderItens();
+  clearItemFields(false);
+  setModoEdicao(false);
+
+  // reseta data pro hoje
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const mm = String(today.getMonth()+1).padStart(2,"0");
+  const dd = String(today.getDate()).padStart(2,"0");
+  document.getElementById("cData").value = `${yyyy}-${mm}-${dd}`;
+  document.getElementById("cFornecedor").value = "";
+
+  showToast("Edição cancelada.", "success");
+}
 
 /* =========================
    BIND EVENTS
@@ -500,10 +671,8 @@ function bind() {
     if (!valor.trim()) return (msg.textContent = "Informe o valor.");
 
     const custoUnit = calcCustoUnitario(modo, valor, qtd);
-
     if (!custoUnit || custoUnit <= 0) return (msg.textContent = "Valor inválido.");
 
-    // info cálculo no modo lote
     const calcInfo = document.getElementById("cCalcInfo");
     if (modo === "lote") {
       calcInfo.textContent = `Custo unitário calculado: ${money(custoUnit)} (total ÷ qtd)`;
@@ -520,7 +689,6 @@ function bind() {
       tamanho: tam,
       qtd,
       custo_unit: custoUnit,
-      // se quiser guardar "modo" e "valor_digitado", dá pra salvar também
     });
 
     renderItens();
@@ -531,7 +699,11 @@ function bind() {
     clearItemFields(true);
   });
 
-  // salvar compra
+  document.getElementById("btnCancelarEdicao").addEventListener("click", () => {
+    cancelarEdicao();
+  });
+
+  // salvar compra (novo/editar)
   document.getElementById("btnSalvarCompra").addEventListener("click", async () => {
     const msg = document.getElementById("cMsg");
     msg.textContent = "";
@@ -544,7 +716,6 @@ function bind() {
 
     const fornecedor = document.getElementById("cFornecedor").value.trim();
 
-    // payload para RPC
     const payload = {
       data,
       fornecedor,
@@ -558,23 +729,29 @@ function bind() {
       }))
     };
 
-    msg.textContent = "Salvando compra...";
+    msg.textContent = state.editCompraId ? "Atualizando compra..." : "Salvando compra...";
     try {
-      await salvarCompraNoBanco(payload);
+      await salvarCompra(payload, state.editCompraId);
 
-      // sem pop-up. só feedback leve e reset
-      msg.textContent = "Compra salva. Estoque atualizado.";
-      msg.className = "small";
+      msg.textContent = state.editCompraId ? "Compra atualizada. Estoque recalculado." : "Compra salva. Estoque atualizado.";
+
+      // reset
       state.itens = [];
       renderItens();
       clearItemFields(false);
 
-      setTimeout(() => { msg.textContent = ""; }, 1200);
+      // sair do modo edição se estava editando
+      if (state.editCompraId) {
+        state.editCompraId = null;
+        setModoEdicao(false);
+      }
 
+      await reloadHistorico();
+
+      setTimeout(() => { msg.textContent = ""; }, 1200);
     } catch (e) {
       console.error(e);
       msg.textContent = e?.message || "Erro ao salvar compra.";
-      msg.className = "small";
     }
   });
 }
@@ -591,6 +768,7 @@ export async function renderCompras() {
       try {
         state.produtos = await loadProdutosComGrade();
         bind();
+        await reloadHistorico();
       } catch (e) {
         console.error(e);
         const msg = document.getElementById("cMsg");
