@@ -17,11 +17,6 @@ const state = {
   produtoCores: new Map(),   // produto_id -> ["Azul", "Preto"...]
   itens: [],                 // itens da compra (carrinho)
 
-  // edição
-  editCompraId: null,
-  historico: [],
-};
-
 // ✅ expõe pro console (fora do objeto!)
 window.__comprasState = state;
 console.log("compras.js carregou ✅", window.__comprasState);
