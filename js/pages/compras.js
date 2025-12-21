@@ -391,35 +391,28 @@ function renderItens() {
 // B) Se você tiver uma RPC (recomendado) que já faz tudo: compra + itens + estoque
 
 async function salvarCompraNoBanco(payload) {
-  // 1) cria a compra
-  const { data: compra, error: e1 } = await sb
-    .from("compras")
-    .insert([{
-      data: payload.data,
-      fornecedor: payload.fornecedor || null,
-      observacoes: payload.observacoes || null,
-      // owner_id fica automático (default auth.uid())
-    }])
-    .select("id")
-    .single();
+  // payload esperado:
+  // { data, fornecedor, observacoes, itens: [{ produto_id, cor, tamanho, qtd, custo_unit }] }
 
-  if (e1) throw e1;
+  const payloadRpc = {
+    data: payload.data,
+    fornecedor: payload.fornecedor || null,
+    observacoes: payload.observacoes || null,
+    itens: (payload.itens || []).map(it => ({
+      produto_id: it.produto_id,
+      cor: it.cor,
+      tamanho: it.tamanho,
+      qtd: Number(it.qtd),
+      custo_unit: Number(it.custo_unit),
+    })),
+  };
 
-  // 2) cria os itens (ATENÇÃO: coluna é "quantidade", não "qtd")
-  const itensDb = payload.itens.map(it => ({
-    compra_id: compra.id,
-    produto_id: it.produto_id,
-    cor: it.cor,
-    tamanho: it.tamanho,
-    quantidade: it.qtd,      // <- seu payload vem "qtd"
-    custo_unit: it.custo_unit
-  }));
+  const { error } = await sb.rpc("registrar_compra", { payload: payloadRpc });
+  if (error) throw error;
 
-  const { error: e2 } = await sb.from("compra_itens").insert(itensDb);
-  if (e2) throw e2;
-
-  return compra.id;
+  return true;
 }
+
 
 
 /* =========================
