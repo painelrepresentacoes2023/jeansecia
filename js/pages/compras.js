@@ -810,7 +810,7 @@ function openEditorCompra(compra, itens) {
                     <td>
                       <input class="input" style="min-width:110px;" type="text" value="${String(Number(x.custo_unit||0)).replace(".", ",")}" data-custo="${i}">
                     </td>
-                    <td>${moneyLocal(lineTotal)}</td>
+                    <td id="lineTotal_${i}">${moneyLocal(lineTotal)}</td>
                     <td>
                       <button class="btn danger" data-rm="${i}">Remover</button>
                     </td>
@@ -822,8 +822,8 @@ function openEditorCompra(compra, itens) {
         </div>
 
         <div class="small" style="margin-top:10px;">
-          Peças: <b>${pecas}</b> • Total: <b>${moneyLocal(total)}</b>
-        </div>
+  Peças: <b id="editorTotalPecas">${pecas}</b> • Total: <b id="editorTotalGeral">${moneyLocal(total)}</b>
+</div>
       </div>
     `;
 
@@ -832,7 +832,7 @@ function openEditorCompra(compra, itens) {
       inp.addEventListener("input", () => {
         const i = Number(inp.dataset.qtd);
         draft[i].qtd = Math.max(0, Number(inp.value || 0));
-        render();
+updateTotalsOnly();
       });
     });
 
@@ -842,7 +842,8 @@ function openEditorCompra(compra, itens) {
         const i = Number(inp.dataset.custo);
         const v = parseNumberBR(inp.value);
         draft[i].custo_unit = Number.isFinite(v) ? v : 0;
-        render();
+        updateTotalsOnly();
+
       });
     });
 
@@ -895,6 +896,24 @@ function openEditorCompra(compra, itens) {
     });
   }
 
+function updateTotalsOnly() {
+  // total geral
+  const total = draft.reduce((s, x) => s + (Number(x.qtd || 0) * Number(x.custo_unit || 0)), 0);
+  const pecas = draft.reduce((s, x) => s + Number(x.qtd || 0), 0);
+
+  const elP = document.getElementById("editorTotalPecas");
+  const elT = document.getElementById("editorTotalGeral");
+  if (elP) elP.textContent = String(pecas);
+  if (elT) elT.textContent = moneyLocal(total);
+
+  // totais por linha
+  draft.forEach((x, i) => {
+    const elLine = document.getElementById(`lineTotal_${i}`);
+    if (elLine) elLine.textContent = moneyLocal(Number(x.qtd||0) * Number(x.custo_unit||0));
+  });
+}
+
+  
   render();
 }
 
