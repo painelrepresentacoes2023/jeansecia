@@ -2,8 +2,8 @@ import { sb } from "../supabase.js";
 
 let editingCompraId = null;
 
+// Toast fallback (não quebra)
 function showToast(msg, type = "info") {
-  // fallback: não quebra o sistema se não existir toast global
   console.log(`[${type}] ${msg}`);
   const el = document.getElementById("cMsg");
   if (el) el.textContent = msg;
@@ -15,16 +15,19 @@ const SIZES_NUM = ["36", "38", "40", "42", "44", "46", "50"];
 const state = {
   produtos: [],              // {id, nome, codigo, categoria_id, categoria_nome, grade_id, grade_nome}
   produtoCores: new Map(),   // produto_id -> ["Azul", "Preto"...]
-  itens: [],                 // itens da compra (carrinho)
+  itens: [],                 // carrinho (itens da compra)
 
-// ✅ expõe pro console (fora do objeto!)
-window.__comprasState = state;
-console.log("compras.js carregou ✅", window.__comprasState);
-  
-  // edição
+  // edição de compra
   editCompraId: null,
   historico: [],
+
+  // edição de item do carrinho
+  editItemIdx: null,         // índice do item em state.itens (quando editando item)
 };
+
+// ✅ expõe pro console (FORA do objeto!)
+window.__comprasState = state;
+console.log("compras.js carregou ✅", window.__comprasState);
 
 function escapeHtml(s = "") {
   return String(s)
@@ -229,6 +232,7 @@ function renderComprasLayout() {
         <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
           <button class="btn primary" id="btnAddItem" disabled>Adicionar item</button>
           <button class="btn" id="btnLimparItem" disabled>Limpar campos</button>
+          <button class="btn" id="btnCancelarItemEdicao" style="display:none;">Cancelar edição do item</button>
         </div>
 
         <div class="small" id="cMsg" style="margin-top:12px;"></div>
@@ -246,7 +250,7 @@ function renderComprasLayout() {
                 <th>Qtd</th>
                 <th>Custo Unit.</th>
                 <th>Total</th>
-                <th style="width:110px;">Ações</th>
+                <th style="width:170px;">Ações</th>
               </tr>
             </thead>
             <tbody id="cItensTbody">
@@ -354,6 +358,13 @@ function clearItemFields(keepProduto = true) {
   const calc = document.getElementById("cCalcInfo");
   if (calc) calc.textContent = "";
 
+  // reset modo edição item
+  state.editItemIdx = null;
+  const btnCancelItem = document.getElementById("btnCancelarItemEdicao");
+  if (btnCancelItem) btnCancelItem.style.display = "none";
+  const btnAdd = document.getElementById("btnAddItem");
+  if (btnAdd) btnAdd.textContent = "Adicionar item";
+
   if (!keepProduto) {
     selectedProduto = null;
     document.getElementById("cProdSearch").value = "";
@@ -391,7 +402,7 @@ function updateModoUI() {
 }
 
 /* =========================
-   ITENS + RESUMO
+   ITENS + RESUMO + EDIÇÃO ITEM
 ========================= */
 
 function calcCustoUnitario(modo, valor, qtd) {
@@ -402,6 +413,108 @@ function calcCustoUnitario(modo, valor, qtd) {
     return Number(unit.toFixed(2));
   }
   return Number(v.toFixed(2));
+}
+
+function startEditItem(idx) {
+  const it = state.itens[idx];
+  if (!it) return;
+
+  state.editItemIdx = idx;
+
+  // seleciona produto no input (sem forçar dropdown)
+  document.getElementById("cProdSearch").value = `${it.produto_nome} (${it.produto_codigo})`;
+  document.getElementById("cCategoriaView").value = it.categoria_nome || "-";
+
+  // deixa campos habilitados
+  document.getElementById("cCor").disabled = false;
+  document.getElementById("cTam").disabled = false;
+  document.getElementById("cQtd").disabled = false;
+  document.getElementById("cModo").disabled = false;
+  document.getElementById("cValor").disabled = false;
+  document.getElementById("btnAddItem").disabled = false;
+  document.getElementById("btnLimparItem").disabled = false;
+
+  // força selectedProduto para manter consistência
+  selectedProduto = state.produtos.find(p => p.id === it.produto_id) || {
+    id: it.produto_id,
+    nome: it.produto_nome,
+    codigo: it.produto_codigo,
+    categoria_id: it.categoria_id || null,
+    categoria_nome: it.categoria_nome || "-",
+    grade_nome: it.grade_nome || "",
+  };
+
+  // preenche selects (com fallback se não tiver carregado)
+  loadCoresDoProduto(it.produto_id)
+    .then(cores => {
+      const corSel = document.getElementById("cCor");
+      corSel.innerHTML = `<option value="">Selecione</option>` + (cores || []).map(c => opt(c, c)).join("");
+      corSel.value = it.cor || "";
+    })
+    .catch(() => {});
+
+  const tamanhos = getTamanhosByGradeNome(selectedProduto.grade_nome || "");
+  const tamSel = document.getElementById("cTam");
+  tamSel.innerHTML = `<option value="">Selecione</option>` + tamanhos.map(t => opt(t, t)).join("");
+  tamSel.value = it.tamanho || "";
+
+  document.getElementById("cQtd").value = String(it.qtd || 1);
+
+  // custo unitário sempre vai no campo
+  document.getElementById("cModo").value = "unit";
+  updateModoUI();
+  document.getElementById("cValor").value = String(it.custo_unit || "").replace(".", ",");
+
+  // UI
+  document.getElementById("btnAddItem").textContent = "Atualizar item";
+  const btnCancelItem = document.getElementById("btnCancelarItemEdicao");
+  if (btnCancelItem) btnCancelItem.style.display = "inline-flex";
+
+  showToast("Editando item do carrinho. Ajuste e clique em Atualizar item.", "info");
+}
+
+function applyEditItemFromFields() {
+  const msg = document.getElementById("cMsg");
+  if (msg) msg.textContent = "";
+
+  if (state.editItemIdx == null) return;
+
+  if (!selectedProduto) return (msg.textContent = "Selecione um produto.");
+  const cor = document.getElementById("cCor").value;
+  const tam = document.getElementById("cTam").value;
+  const qtd = Number(document.getElementById("cQtd").value || 0);
+  const modo = document.getElementById("cModo").value;
+  const valor = document.getElementById("cValor").value;
+
+  if (!cor) return (msg.textContent = "Selecione a cor.");
+  if (!tam) return (msg.textContent = "Selecione o tamanho.");
+  if (!qtd || qtd < 1) return (msg.textContent = "Quantidade inválida.");
+  if (!valor.trim()) return (msg.textContent = "Informe o valor.");
+
+  const custoUnit = calcCustoUnitario(modo, valor, qtd);
+  if (!custoUnit || custoUnit <= 0) return (msg.textContent = "Valor inválido.");
+
+  const idx = state.editItemIdx;
+  const old = state.itens[idx];
+  if (!old) return;
+
+  state.itens[idx] = {
+    ...old,
+    produto_id: selectedProduto.id,
+    produto_nome: selectedProduto.nome,
+    produto_codigo: selectedProduto.codigo,
+    categoria_id: selectedProduto.categoria_id,
+    categoria_nome: selectedProduto.categoria_nome,
+    grade_nome: selectedProduto.grade_nome,
+    cor,
+    tamanho: tam,
+    qtd,
+    custo_unit: custoUnit,
+  };
+
+  renderItens();
+  clearItemFields(true);
+  showToast("Item atualizado no carrinho.", "success");
 }
 
 function renderItens() {
@@ -415,16 +528,19 @@ function renderItens() {
   }
 
   tbody.innerHTML = state.itens.map((it, idx) => {
-    const total = it.qtd * it.custo_unit;
+    const total = Number(it.qtd || 0) * Number(it.custo_unit || 0);
     return `
       <tr>
         <td>${escapeHtml(it.produto_nome)} <span class="small">(${escapeHtml(it.produto_codigo)})</span></td>
         <td>${escapeHtml(it.cor)}</td>
         <td>${escapeHtml(it.tamanho)}</td>
-        <td>${it.qtd}</td>
+        <td>${Number(it.qtd || 0)}</td>
         <td>${money(it.custo_unit)}</td>
         <td>${money(total)}</td>
-        <td><button class="btn danger" data-rm="${idx}">Remover</button></td>
+        <td style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn" data-ed="${idx}">Editar</button>
+          <button class="btn danger" data-rm="${idx}">Remover</button>
+        </td>
       </tr>
     `;
   }).join("");
@@ -433,12 +549,28 @@ function renderItens() {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.rm);
       state.itens.splice(idx, 1);
+
+      // se estava editando um índice que mudou, reseta
+      state.editItemIdx = null;
+      const btnCancelItem = document.getElementById("btnCancelarItemEdicao");
+      if (btnCancelItem) btnCancelItem.style.display = "none";
+      const btnAdd = document.getElementById("btnAddItem");
+      if (btnAdd) btnAdd.textContent = "Adicionar item";
+
       renderItens();
+      showToast("Item removido do carrinho.", "success");
     });
   });
 
-  const totalGeral = state.itens.reduce((s, it) => s + (it.qtd * it.custo_unit), 0);
-  const totalPecas = state.itens.reduce((s, it) => s + it.qtd, 0);
+  tbody.querySelectorAll("button[data-ed]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = Number(btn.dataset.ed);
+      startEditItem(idx);
+    });
+  });
+
+  const totalGeral = state.itens.reduce((s, it) => s + (Number(it.qtd || 0) * Number(it.custo_unit || 0)), 0);
+  const totalPecas = state.itens.reduce((s, it) => s + Number(it.qtd || 0), 0);
 
   document.getElementById("cResumo").textContent =
     `Total de itens: ${totalPecas} • Total da compra: ${money(totalGeral)}`;
@@ -485,7 +617,7 @@ function renderHistoricoTable() {
   const tbody = document.getElementById("hTbody");
 
   const rows = state.historico || [];
-  info.textContent = `${rows.length} compra(s) no histórico.`;
+  if (info) info.textContent = `${rows.length} compra(s) no histórico.`;
 
   if (!rows.length) {
     tbody.innerHTML = `<tr><td colspan="5" class="small">Nenhuma compra encontrada.</td></tr>`;
@@ -589,7 +721,6 @@ async function verItensCompra(compraId) {
   }
 }
 
-
 /* =========================
    EDITAR COMPRA
 ========================= */
@@ -599,6 +730,8 @@ function setModoEdicao(on) {
   const sub = document.getElementById("subCompra");
   const btn = document.getElementById("btnSalvarCompra");
   const btnCancel = document.getElementById("btnCancelarEdicao");
+
+  if (!titulo || !sub || !btn || !btnCancel) return;
 
   if (on) {
     titulo.textContent = "Editar Compra";
@@ -623,40 +756,40 @@ async function editarCompra(compraId) {
 
     const itens = await loadCompraItens(compraId);
 
-    // seta modo edição
     state.editCompraId = compraId;
     setModoEdicao(true);
 
-    // preenche cabeçalho
     document.getElementById("cData").value = compra.data || "";
     document.getElementById("cFornecedor").value = compra.fornecedor || "";
 
-    // transforma itens da view em itens do carrinho
+    // joga itens da compra no carrinho (editável)
     state.itens = (itens || []).map(i => ({
-  item_id: i.item_id || i.compra_item_id || i.id || null, // 👈 precisa vir da VIEW
-  produto_id: i.produto_id,
-  produto_nome: i.produto,
-  produto_codigo: i.codigo_produto,
-  cor: i.cor,
-  tamanho: i.tamanho,
-  qtd: Number(i.quantidade || 0),
-  custo_unit: Number(i.custo_unit || 0),
-}));
+      produto_id: i.produto_id,
+      produto_nome: i.produto,
+      produto_codigo: i.codigo_produto,
+      cor: i.cor,
+      tamanho: i.tamanho,
+      qtd: Number(i.quantidade || 0),
+      custo_unit: Number(i.custo_unit || 0),
 
+      // extras pra facilitar edição do item
+      categoria_id: i.categoria_id || null,
+      categoria_nome: i.categoria || "-",
+      grade_nome: i.grade_nome || "",
+    }));
 
     renderItens();
-
-    // limpa seleção do item (pra adicionar novos)
     clearItemFields(false);
 
     const msg = document.getElementById("cMsg");
-if (msg) msg.textContent = "Compra carregada para edição.";
+    if (msg) msg.textContent = "Compra carregada para edição. Você pode editar/remover itens e salvar.";
 
+    showToast("Compra carregada para edição.", "success");
   } catch (e) {
     console.error(e);
     const msg = document.getElementById("cMsg");
-if (msg) msg.textContent = "Erro ao abrir compra para edição.";
-
+    if (msg) msg.textContent = "Erro ao abrir compra para edição.";
+    showToast("Erro ao abrir compra para edição.", "error");
   }
 }
 
@@ -667,7 +800,6 @@ function cancelarEdicao() {
   clearItemFields(false);
   setModoEdicao(false);
 
-  // reseta data pro hoje
   const today = new Date();
   const yyyy = today.getFullYear();
   const mm = String(today.getMonth()+1).padStart(2,"0");
@@ -709,18 +841,33 @@ function bind() {
   document.addEventListener("click", (e) => {
     const box = document.getElementById("cProdList");
     const wrap = document.getElementById("cProdSearch");
-    if (!box.contains(e.target) && e.target !== wrap) box.style.display = "none";
+    if (box && wrap && !box.contains(e.target) && e.target !== wrap) box.style.display = "none";
   });
 
   // modo custo
   document.getElementById("cModo").addEventListener("change", updateModoUI);
 
-  // adicionar item
+  // cancelar edição do item
+  document.getElementById("btnCancelarItemEdicao").addEventListener("click", () => {
+    clearItemFields(true);
+    showToast("Edição do item cancelada.", "info");
+  });
+
+  // adicionar / atualizar item
   document.getElementById("btnAddItem").addEventListener("click", () => {
     const msg = document.getElementById("cMsg");
-    msg.textContent = "";
-    msg.className = "small";
+    if (msg) {
+      msg.textContent = "";
+      msg.className = "small";
+    }
 
+    // se estiver editando item, aplica update no item existente
+    if (state.editItemIdx != null) {
+      applyEditItemFromFields();
+      return;
+    }
+
+    // modo normal: adicionar item novo
     if (!selectedProduto) return (msg.textContent = "Selecione um produto.");
     const cor = document.getElementById("cCor").value;
     const tam = document.getElementById("cTam").value;
@@ -748,6 +895,8 @@ function bind() {
       produto_nome: selectedProduto.nome,
       produto_codigo: selectedProduto.codigo,
       categoria_id: selectedProduto.categoria_id,
+      categoria_nome: selectedProduto.categoria_nome,
+      grade_nome: selectedProduto.grade_nome,
       cor,
       tamanho: tam,
       qtd,
@@ -769,8 +918,10 @@ function bind() {
   // salvar compra (novo/editar)
   document.getElementById("btnSalvarCompra").addEventListener("click", async () => {
     const msg = document.getElementById("cMsg");
-    msg.textContent = "";
-    msg.className = "small";
+    if (msg) {
+      msg.textContent = "";
+      msg.className = "small";
+    }
 
     if (!state.itens.length) return (msg.textContent = "Adicione pelo menos 1 item.");
 
@@ -796,21 +947,22 @@ function bind() {
     try {
       await salvarCompra(payload, state.editCompraId);
 
-      msg.textContent = state.editCompraId ? "Compra atualizada. Estoque recalculado." : "Compra salva. Estoque atualizado.";
+      msg.textContent = state.editCompraId
+        ? "Compra atualizada. Estoque recalculado."
+        : "Compra salva. Estoque atualizado.";
 
-      // reset
+      // reset carrinho
       state.itens = [];
       renderItens();
       clearItemFields(false);
 
-      // sair do modo edição se estava editando
+      // sair modo edição compra
       if (state.editCompraId) {
         state.editCompraId = null;
         setModoEdicao(false);
       }
 
       await reloadHistorico();
-
       setTimeout(() => { msg.textContent = ""; }, 1200);
     } catch (e) {
       console.error(e);
