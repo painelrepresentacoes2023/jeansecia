@@ -51,6 +51,170 @@ function showToast(msg, type = "info") {
   console.log(`[${type}] ${msg}`);
 }
 
+// ===============================
+// EXCLUIR COMPRA (modal próprio)
+// ===============================
+
+// Se você já tem um estado global de "compra em edição", a ideia é setar aqui.
+// Ex.: quando clicar em "Editar", você faz: COMPRA_EDITANDO_ID = compraId;
+let COMPRA_EDITANDO_ID = null;
+
+let _modalExcluirCompra = null;
+let _compraIdParaExcluir = null;
+
+function garantirModalExcluirCompra() {
+  if (_modalExcluirCompra) return _modalExcluirCompra;
+
+  const modal = document.createElement("div");
+  modal.id = "modalExcluirCompra";
+  modal.style.cssText = `
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,.45);
+    z-index: 9999;
+    padding: 16px;
+  `;
+
+  modal.innerHTML = `
+    <div style="
+      width: min(520px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.2);
+    ">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <h3 style="margin:0; font-size:18px;">Excluir compra</h3>
+        <button type="button" id="btnFecharModalExcluir" class="btn" style="min-width:auto;">✕</button>
+      </div>
+
+      <p style="margin:12px 0 0; line-height:1.35;">
+        Tem certeza que deseja excluir esta compra?
+        <br />
+        <strong>Isso vai apagar os itens e reverter o estoque.</strong>
+      </p>
+
+      <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap;">
+        <button type="button" id="btnCancelarExcluir" class="btn">Cancelar</button>
+        <button type="button" id="btnConfirmarExcluir" class="btn danger">Excluir</button>
+      </div>
+    </div>
+  `;
+
+  // Fechar clicando fora
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) fecharModalExcluirCompra();
+  });
+
+  document.body.appendChild(modal);
+
+  modal.querySelector("#btnFecharModalExcluir").addEventListener("click", fecharModalExcluirCompra);
+  modal.querySelector("#btnCancelarExcluir").addEventListener("click", fecharModalExcluirCompra);
+
+  modal.querySelector("#btnConfirmarExcluir").addEventListener("click", async () => {
+    if (!_compraIdParaExcluir) return;
+    await excluirCompra(_compraIdParaExcluir);
+  });
+
+  _modalExcluirCompra = modal;
+  return modal;
+}
+
+function abrirModalExcluirCompra(compraId) {
+  const modal = garantirModalExcluirCompra();
+  _compraIdParaExcluir = compraId;
+  modal.style.display = "flex";
+}
+
+function fecharModalExcluirCompra() {
+  if (!_modalExcluirCompra) return;
+  _modalExcluirCompra.style.display = "none";
+  _compraIdParaExcluir = null;
+}
+
+// Ajuste aqui se você já tem uma função pronta de "cancelar edição".
+// Eu deixei seguro: se não existir nada, não quebra.
+function cancelarEdicaoSeForEssaCompra(compraId) {
+  try {
+    if (COMPRA_EDITANDO_ID && COMPRA_EDITANDO_ID === compraId) {
+      COMPRA_EDITANDO_ID = null;
+
+      // Se você tiver um método seu, chame aqui:
+      // ex: cancelarEdicaoCompra();
+      if (typeof window.cancelarEdicaoCompra === "function") {
+        window.cancelarEdicaoCompra();
+      }
+
+      // Se você usa algum "estado" / "form" manual, limpe aqui também (se já existir no seu código).
+      // Não vou mexer nos seus IDs porque você não passou.
+    }
+  } catch (e) {
+    // não trava por causa de estado
+    console.warn("Falha ao cancelar edição:", e);
+  }
+}
+
+function toastSafe(msg, type = "info") {
+  // Usa seu toast se existir; senão, cai no console (sem popup).
+  const fn =
+    window.toast ||
+    window.showToast ||
+    window.mostrarToast ||
+    window.toastify ||
+    null;
+
+  if (typeof fn === "function") return fn(msg, type);
+  console.log(`[${type}] ${msg}`);
+}
+
+async function excluirCompra(compraId) {
+  try {
+    // UI: desabilita botão enquanto executa
+    const modal = garantirModalExcluirCompra();
+    const btn = modal.querySelector("#btnConfirmarExcluir");
+    const btnCancel = modal.querySelector("#btnCancelarExcluir");
+    btn.disabled = true;
+    btnCancel.disabled = true;
+    btn.textContent = "Excluindo...";
+
+    // Se estiver editando essa compra, cancela edição/estado
+    cancelarEdicaoSeForEssaCompra(compraId);
+
+    // RPC
+    const { error } = await sb.rpc("deletar_compra", { p_compra_id: compraId });
+    if (error) throw error;
+
+    fecharModalExcluirCompra();
+
+    // Recarrega histórico (use o seu método existente)
+    // Se no seu código for outro nome, troque AQUI só essa linha:
+    if (typeof carregarHistoricoCompras === "function") {
+      await carregarHistoricoCompras();
+    } else if (typeof loadCompras === "function") {
+      await loadCompras();
+    } else if (typeof renderHistoricoCompras === "function") {
+      await renderHistoricoCompras();
+    }
+
+    toastSafe("Compra excluída e estoque revertido.", "success");
+  } catch (err) {
+    console.error(err);
+    toastSafe(`Erro ao excluir: ${err?.message || err}`, "error");
+  } finally {
+    // Reabilita botões
+    const modal = garantirModalExcluirCompra();
+    const btn = modal.querySelector("#btnConfirmarExcluir");
+    const btnCancel = modal.querySelector("#btnCancelarExcluir");
+    btn.disabled = false;
+    btnCancel.disabled = false;
+    btn.textContent = "Excluir";
+  }
+}
+
+
 /* =========================
    STATE
 ========================= */
@@ -339,6 +503,7 @@ function renderHistoricoTable() {
           <td style="display:flex; gap:8px; flex-wrap:wrap;">
             <button class="btn" data-ver="${r.compra_id}">Ver itens</button>
             <button class="btn primary" data-editar="${r.compra_id}">Editar</button>
+            <button class="btn danger" data-excluir="${r.compra_id}">Excluir</button>
           </td>
         </tr>
       `;
@@ -352,10 +517,22 @@ function renderHistoricoTable() {
   });
 
   tbody.querySelectorAll("button[data-editar]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      await abrirModalCompraEdicao(btn.dataset.editar);
-    });
+  btn.addEventListener("click", async () => {
+    const compraId = btn.dataset.editar;
+
+    COMPRA_EDITANDO_ID = compraId; // <<< ESTA LINHA
+
+    await abrirModalCompraEdicao(compraId);
   });
+});
+
+
+   tbody.querySelectorAll('button[data-excluir]').forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const compraId = btn.getAttribute("data-excluir");
+    abrirModalExcluirCompra(compraId);
+  });
+});
 }
 
 async function reloadHistorico() {
