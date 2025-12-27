@@ -883,7 +883,27 @@ function bindVendas() {
       msg.textContent = e?.message || "Erro ao salvar venda.";
     }
   });
+   // BOTÃO GLOBAL "+ Nova Venda" (topo)
+const btnNovaVendaTop = document.getElementById("btnNovaVenda");
+
+if (btnNovaVendaTop) {
+  btnNovaVendaTop.onclick = (e) => {
+    e.preventDefault();
+
+    // se não estiver na aba vendas, navega
+    if (!location.hash.includes("vendas")) {
+      location.hash = "#vendas";
+
+      // espera a tela montar
+      setTimeout(() => iniciarNovaVenda(), 200);
+    } else {
+      iniciarNovaVenda();
+    }
+  };
 }
+}
+
+
 
 /* =========================
    EXPORT
