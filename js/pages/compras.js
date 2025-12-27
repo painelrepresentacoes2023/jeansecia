@@ -78,31 +78,33 @@ function garantirModalExcluirCompra() {
     padding: 16px;
   `;
 
-  modal.innerHTML = `
-    <div style="
-      width: min(520px, 100%);
-      background: #fff;
-      border-radius: 12px;
-      padding: 16px;
-      box-shadow: 0 10px 30px rgba(0,0,0,.2);
-    ">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
-        <h3 style="margin:0; font-size:18px;">Excluir compra</h3>
-        <button type="button" id="btnFecharModalExcluir" class="btn" style="min-width:auto;">✕</button>
-      </div>
-
-      <p style="margin:12px 0 0; line-height:1.35;">
-        Tem certeza que deseja excluir esta compra?
-        <br />
-        <strong>Isso vai apagar os itens e reverter o estoque.</strong>
-      </p>
-
-      <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap;">
-        <button type="button" id="btnCancelarExcluir" class="btn">Cancelar</button>
-        <button type="button" id="btnConfirmarExcluir" class="btn danger">Excluir</button>
-      </div>
+ modal.innerHTML = `
+  <div style="
+    width: min(520px, 100%);
+    background: #fff;
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.2);
+    color: #111;
+  ">
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+      <h3 style="margin:0; font-size:18px; color:#111; opacity:1;">Excluir compra</h3>
+      <button type="button" id="btnFecharModalExcluir" class="btn" style="min-width:auto; opacity:1;">✕</button>
     </div>
-  `;
+
+    <p style="margin:12px 0 0; line-height:1.35; color:#222; opacity:1;">
+      Tem certeza que deseja excluir esta compra?
+      <br />
+      <strong style="color:#000; opacity:1;">Isso vai apagar os itens e reverter o estoque.</strong>
+    </p>
+
+    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap;">
+      <button type="button" id="btnCancelarExcluir" class="btn" style="opacity:1;">Cancelar</button>
+      <button type="button" id="btnConfirmarExcluir" class="btn danger" style="opacity:1;">Excluir</button>
+    </div>
+  </div>
+`;
+
 
   // Fechar clicando fora
   modal.addEventListener("click", (e) => {
@@ -172,47 +174,49 @@ function toastSafe(msg, type = "info") {
 
 async function excluirCompra(compraId) {
   try {
-    // UI: desabilita botão enquanto executa
     const modal = garantirModalExcluirCompra();
     const btn = modal.querySelector("#btnConfirmarExcluir");
     const btnCancel = modal.querySelector("#btnCancelarExcluir");
+
     btn.disabled = true;
     btnCancel.disabled = true;
     btn.textContent = "Excluindo...";
 
-    // Se estiver editando essa compra, cancela edição/estado
+    // Se estiver editando essa compra, cancela estado
     cancelarEdicaoSeForEssaCompra(compraId);
 
     // RPC
     const { error } = await sb.rpc("deletar_compra", { p_compra_id: compraId });
     if (error) throw error;
 
+    // 1) Fecha modal
     fecharModalExcluirCompra();
 
-    // Recarrega histórico (use o seu método existente)
-    // Se no seu código for outro nome, troque AQUI só essa linha:
-    if (typeof carregarHistoricoCompras === "function") {
-      await carregarHistoricoCompras();
-    } else if (typeof loadCompras === "function") {
-      await loadCompras();
-    } else if (typeof renderHistoricoCompras === "function") {
-      await renderHistoricoCompras();
-    }
+    // 2) Remove do STATE (pra não voltar)
+    state.historico = (state.historico || []).filter((x) => x.compra_id !== compraId);
+
+    // 3) Remove do DOM (some imediatamente)
+    const row = document.querySelector(`tr[data-row-compra="${compraId}"]`);
+    if (row) row.remove();
+
+    // 4) Re-renderiza a tabela (pra atualizar contagem e filtros)
+    renderHistoricoTable();
 
     toastSafe("Compra excluída e estoque revertido.", "success");
   } catch (err) {
     console.error(err);
     toastSafe(`Erro ao excluir: ${err?.message || err}`, "error");
   } finally {
-    // Reabilita botões
     const modal = garantirModalExcluirCompra();
     const btn = modal.querySelector("#btnConfirmarExcluir");
     const btnCancel = modal.querySelector("#btnCancelarExcluir");
+
     btn.disabled = false;
     btnCancel.disabled = false;
     btn.textContent = "Excluir";
   }
 }
+
 
 
 /* =========================
@@ -494,7 +498,7 @@ function renderHistoricoTable() {
     .map((r) => {
       const produtos = (r.produtos_resumo || "").trim();
       return `
-        <tr>
+        <tr data-row-compra="${r.compra_id}">
           <td>${fmtDateBR(r.data)}</td>
           <td>${escapeHtml(r.fornecedor || "-")}</td>
           <td class="small">${escapeHtml(produtos || "-")}</td>
@@ -1354,6 +1358,9 @@ function bindMainEvents() {
 
 export async function renderCompras() {
   try {
+     localStorage.setItem("ultima_pagina", "compras");
+location.hash = "#compras";
+
     const html = renderComprasLayout();
 
     setTimeout(async () => {
