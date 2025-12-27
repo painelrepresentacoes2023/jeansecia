@@ -47,9 +47,9 @@ const state = {
   produtos: [],            // [{id,nome,codigo,categoria_nome}]
   produtoCores: new Map(), // produto_id -> [cor]
   historico: [],
-  itens: [],               // carrinho: [{variacao_id, produto_nome, codigo, cor, tamanho, qtd, preco_unit}]
+  itens: [],               // carrinho: [{variacao_id, produto_nome, produto_codigo, cor, tamanho, qtd, preco_unit}]
   editVendaId: null,
-  formas: [],              // enum "forma"
+  formas: [],
 };
 
 window.__vendasState = state;
@@ -58,8 +58,7 @@ window.__vendasState = state;
    LOADERS
 ========================= */
 async function loadFormasEnum() {
-  // seu enum chama "forma" (pelo print da tabela vendas/pagamentos)
-  // se um dia mudar, basta trocar aqui
+  // depende do seu RPC enum_values já existente
   const { data, error } = await sb.rpc("enum_values", { enum_type: "forma" });
   if (error) throw error;
   return (data || []).map(x => x.value);
@@ -100,7 +99,6 @@ async function loadCoresDoProduto(produtoId) {
 }
 
 async function loadTamanhosDaVariacao(produtoId, cor) {
-  // pega tamanhos existentes na tabela variacoes para (produtoId + cor)
   const { data, error } = await sb
     .from("variacoes")
     .select("id, tamanho")
@@ -135,6 +133,25 @@ async function loadVendaItens(vendaId) {
 
   if (error) throw error;
   return data || [];
+}
+
+// Estoque atual por variacao_id (para validar antes de salvar)
+async function loadEstoquePorVariacoes(variacaoIds = []) {
+  const ids = Array.from(new Set((variacaoIds || []).filter(Boolean)));
+  if (!ids.length) return new Map();
+
+  const { data, error } = await sb
+    .from("estoque")
+    .select("variacao_id, quantidade")
+    .in("variacao_id", ids);
+
+  if (error) throw error;
+
+  const m = new Map();
+  (data || []).forEach(r => m.set(r.variacao_id, Number(r.quantidade || 0)));
+  // se não veio no select, considera 0
+  ids.forEach(id => { if (!m.has(id)) m.set(id, 0); });
+  return m;
 }
 
 /* =========================
@@ -302,7 +319,7 @@ function renderVendasLayout() {
    PROD SEARCH DROPDOWN
 ========================= */
 let selectedProduto = null;
-let selectedVariacoes = []; // [{id,tamanho}]
+let selectedVariacoes = [];
 
 function showProdList(items) {
   const box = document.getElementById("vProdList");
@@ -336,22 +353,16 @@ async function selectProduto(p) {
   document.getElementById("vProdSearch").value = `${p.nome} (${p.codigo})`;
   document.getElementById("vCategoriaView").value = p.categoria_nome || "-";
 
-  // habilita campos
-  document.getElementById("vCor").disabled = false;
-  document.getElementById("vTam").disabled = false;
-  document.getElementById("vQtd").disabled = false;
-  document.getElementById("vPreco").disabled = false;
-  document.getElementById("btnAddVendaItem").disabled = false;
-  document.getElementById("btnLimparVendaItem").disabled = false;
+  ["vCor","vTam","vQtd","vPreco","btnAddVendaItem","btnLimparVendaItem"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = false;
+  });
 
-  // carrega cores
   const cores = await loadCoresDoProduto(p.id);
   const corSel = document.getElementById("vCor");
   corSel.innerHTML = `<option value="">Selecione</option>` + cores.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 
-  // limpa tamanhos
-  const tamSel = document.getElementById("vTam");
-  tamSel.innerHTML = `<option value="">Selecione a cor</option>`;
+  document.getElementById("vTam").innerHTML = `<option value="">Selecione a cor</option>`;
 }
 
 async function onCorChange() {
@@ -382,12 +393,10 @@ function clearVendaItemFields(keepProduto = true) {
     document.getElementById("vCategoriaView").value = "";
     document.getElementById("vCor").innerHTML = `<option value="">Selecione o produto</option>`;
     document.getElementById("vTam").innerHTML = `<option value="">Selecione o produto</option>`;
-    document.getElementById("vCor").disabled = true;
-    document.getElementById("vTam").disabled = true;
-    document.getElementById("vQtd").disabled = true;
-    document.getElementById("vPreco").disabled = true;
-    document.getElementById("btnAddVendaItem").disabled = true;
-    document.getElementById("btnLimparVendaItem").disabled = true;
+    ["vCor","vTam","vQtd","vPreco","btnAddVendaItem","btnLimparVendaItem"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = true;
+    });
   } else {
     document.getElementById("vCor").value = "";
     document.getElementById("vTam").innerHTML = `<option value="">Selecione a cor</option>`;
@@ -397,13 +406,20 @@ function clearVendaItemFields(keepProduto = true) {
 }
 
 /* =========================
-   ITENS (sem perder cursor)
+   ITENS
 ========================= */
 function calcResumoVenda() {
   const subtotal = state.itens.reduce((s, it) => s + (it.qtd * it.preco_unit), 0);
   const desconto = parseNumberBR(document.getElementById("vDesconto").value);
   const total = Math.max(subtotal - desconto, 0);
   return { subtotal, desconto, total };
+}
+
+function updateResumoOnly() {
+  const { subtotal, desconto, total } = calcResumoVenda();
+  const totalPecas = state.itens.reduce((s, it) => s + it.qtd, 0);
+  document.getElementById("vResumo").textContent =
+    `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
 }
 
 function renderItensVenda() {
@@ -443,7 +459,6 @@ function renderItensVenda() {
     `;
   }).join("");
 
-  // listeners de input SEM rerender a cada tecla (pra não sumir cursor)
   tbody.querySelectorAll("input[data-qtd]").forEach(inp => {
     inp.addEventListener("input", () => {
       const idx = Number(inp.dataset.qtd);
@@ -454,15 +469,11 @@ function renderItensVenda() {
   });
 
   tbody.querySelectorAll("input[data-preco]").forEach(inp => {
-    inp.addEventListener("input", () => {
-      // deixa digitar livre; só valida no blur
-      updateResumoOnly();
-    });
+    inp.addEventListener("input", () => updateResumoOnly());
     inp.addEventListener("blur", () => {
       const idx = Number(inp.dataset.preco);
       const v = parseNumberBR(inp.value);
       state.itens[idx].preco_unit = Math.max(0, Number(v.toFixed(2)));
-      // normaliza o campo
       inp.value = String(state.itens[idx].preco_unit).replace(".", ",");
       updateResumoOnly();
     });
@@ -479,13 +490,6 @@ function renderItensVenda() {
 
   document.getElementById("btnSalvarVenda").disabled = false;
   updateResumoOnly();
-}
-
-function updateResumoOnly() {
-  const { subtotal, desconto, total } = calcResumoVenda();
-  const totalPecas = state.itens.reduce((s, it) => s + it.qtd, 0);
-  document.getElementById("vResumo").textContent =
-    `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
 }
 
 /* =========================
@@ -622,7 +626,7 @@ function setModoEdicaoVenda(on) {
 
   if (on) {
     titulo.textContent = "Editar Venda";
-    sub.textContent = "Você está editando uma venda existente. Ao salvar, o estoque será recalculado.";
+    sub.textContent = "Você está editando uma venda existente. Ao salvar, o estoque será ajustado automaticamente.";
     btn.textContent = "Atualizar venda";
     btnCancel.style.display = "inline-flex";
   } else {
@@ -643,7 +647,6 @@ async function editarVenda(vendaId) {
     state.editVendaId = vendaId;
     setModoEdicaoVenda(true);
 
-    // preenche cabeçalho
     const d = new Date(venda.data);
     const isoLocal = Number.isNaN(d.getTime())
       ? ""
@@ -656,7 +659,6 @@ async function editarVenda(vendaId) {
     document.getElementById("vDesconto").value = String(Number(venda.desconto_valor || 0)).replace(".", ",");
     document.getElementById("vObs").value = venda.observacoes || "";
 
-    // itens para carrinho (usando variacao_id)
     state.itens = (itens || []).map(i => ({
       variacao_id: i.variacao_id,
       produto_nome: i.produto,
@@ -681,7 +683,6 @@ function cancelarEdicaoVenda() {
   setModoEdicaoVenda(false);
   renderItensVenda();
 
-  // reseta campos
   setDefaultDateTimeNow();
   document.getElementById("vCliente").value = "";
   document.getElementById("vTelefone").value = "";
@@ -702,18 +703,15 @@ function setDefaultDateTimeNow() {
 function bindVendas() {
   setDefaultDateTimeNow();
 
-  // enum formas
   const selForma = document.getElementById("vForma");
   selForma.innerHTML = (state.formas || []).map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
 
-  // filtro histórico
-  document.getElementById("hVendaFiltro").addEventListener("input", (e) => {
+  document.getElementById("hVendaFiltro")?.addEventListener("input", (e) => {
     renderHistoricoVendasTable(e.target.value);
   });
 
-  // buscar produto
   const inp = document.getElementById("vProdSearch");
-  inp.addEventListener("input", () => {
+  inp?.addEventListener("input", () => {
     const q = (inp.value || "").trim().toLowerCase();
     if (!q || q.length < 2) return showProdList([]);
     const items = state.produtos.filter(p =>
@@ -723,24 +721,22 @@ function bindVendas() {
     showProdList(items);
   });
 
-  // fecha dropdown clicando fora
   document.addEventListener("click", (e) => {
     const box = document.getElementById("vProdList");
     const wrap = document.getElementById("vProdSearch");
     if (box && wrap && !box.contains(e.target) && e.target !== wrap) box.style.display = "none";
   });
 
-  // cor -> carrega tamanhos/variação
-  document.getElementById("vCor").addEventListener("change", onCorChange);
+  document.getElementById("vCor")?.addEventListener("change", onCorChange);
 
-  // add item
-  document.getElementById("btnAddVendaItem").addEventListener("click", () => {
+  document.getElementById("btnAddVendaItem")?.addEventListener("click", () => {
     const msg = document.getElementById("vMsg");
-    msg.textContent = "";
+    if (msg) msg.textContent = "";
 
     if (!selectedProduto) return (msg.textContent = "Selecione um produto.");
+
     const cor = document.getElementById("vCor").value;
-    const variacaoId = document.getElementById("vTam").value; // aqui é ID da variação
+    const variacaoId = document.getElementById("vTam").value;
     const tamanho = document.getElementById("vTam").selectedOptions?.[0]?.textContent || "";
     const qtd = Math.max(1, Number(document.getElementById("vQtd").value || 1));
     const preco = parseNumberBR(document.getElementById("vPreco").value);
@@ -749,11 +745,11 @@ function bindVendas() {
     if (!variacaoId) return (msg.textContent = "Selecione o tamanho.");
     if (!preco || preco <= 0) return (msg.textContent = "Preço inválido.");
 
-    // se já existe o mesmo item (mesma variação), soma qtd
-    const existing = state.itens.find(x => x.variacao_id === variacaoId && x.preco_unit === Number(preco.toFixed(2)));
-    if (existing) {
-      existing.qtd += qtd;
-    } else {
+    // soma qtd se mesma variação + mesmo preço
+    const precoFix = Number(preco.toFixed(2));
+    const existing = state.itens.find(x => x.variacao_id === variacaoId && x.preco_unit === precoFix);
+    if (existing) existing.qtd += qtd;
+    else {
       state.itens.push({
         variacao_id: variacaoId,
         produto_nome: selectedProduto.nome,
@@ -761,7 +757,7 @@ function bindVendas() {
         cor,
         tamanho,
         qtd,
-        preco_unit: Number(preco.toFixed(2)),
+        preco_unit: precoFix,
       });
     }
 
@@ -769,21 +765,18 @@ function bindVendas() {
     clearVendaItemFields(true);
   });
 
-  document.getElementById("btnLimparVendaItem").addEventListener("click", () => {
+  document.getElementById("btnLimparVendaItem")?.addEventListener("click", () => {
     clearVendaItemFields(true);
   });
 
-  document.getElementById("btnCancelarVendaEdicao").addEventListener("click", cancelarEdicaoVenda);
+  document.getElementById("btnCancelarVendaEdicao")?.addEventListener("click", cancelarEdicaoVenda);
 
-  // desconto atualiza resumo sem rerender
-  document.getElementById("vDesconto").addEventListener("input", () => {
-    updateResumoOnly();
-  });
+  document.getElementById("vDesconto")?.addEventListener("input", () => updateResumoOnly());
 
-  // salvar venda
-  document.getElementById("btnSalvarVenda").addEventListener("click", async () => {
+  // SALVAR VENDA (com validação de estoque antes)
+  document.getElementById("btnSalvarVenda")?.addEventListener("click", async () => {
     const msg = document.getElementById("vMsg");
-    msg.textContent = "";
+    if (msg) msg.textContent = "";
 
     if (!state.itens.length) return (msg.textContent = "Adicione pelo menos 1 item.");
 
@@ -792,6 +785,29 @@ function bindVendas() {
 
     const forma = document.getElementById("vForma").value;
     if (!forma) return (msg.textContent = "Selecione a forma.");
+
+    // valida estoque (lado client) pra não dar susto
+    try {
+      const ids = state.itens.map(i => i.variacao_id);
+      const estoqueMap = await loadEstoquePorVariacoes(ids);
+
+      // soma qtd por variacao_id (se repetiu)
+      const somaPorVar = new Map();
+      for (const it of state.itens) {
+        somaPorVar.set(it.variacao_id, (somaPorVar.get(it.variacao_id) || 0) + Number(it.qtd || 0));
+      }
+
+      for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
+        const emEstoque = estoqueMap.get(variacaoId) ?? 0;
+        if (emEstoque < qtdVendendo) {
+          throw new Error(`Estoque insuficiente. Em estoque=${emEstoque} / Tentando vender=${qtdVendendo}`);
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      msg.textContent = e?.message || "Estoque insuficiente.";
+      return;
+    }
 
     const { subtotal, desconto, total } = calcResumoVenda();
 
@@ -810,6 +826,7 @@ function bindVendas() {
     };
 
     msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
+
     try {
       await salvarVendaRPC(payload, state.editVendaId);
 
