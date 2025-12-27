@@ -433,7 +433,8 @@ function renderItensVenda() {
   }
 
   tbody.innerHTML = state.itens.map((it, idx) => {
-    const total = it.qtd * it.preco_unit;
+    const total = Number(it.qtd || 0) * Number(it.preco_unit || 0);
+
     return `
       <tr>
         <td>${escapeHtml(it.produto_nome)} <span class="small">(${escapeHtml(it.produto_codigo)})</span></td>
@@ -459,6 +460,7 @@ function renderItensVenda() {
     `;
   }).join("");
 
+  // QTD
   tbody.querySelectorAll("input[data-qtd]").forEach(inp => {
     inp.addEventListener("input", () => {
       const idx = Number(inp.dataset.qtd);
@@ -468,8 +470,8 @@ function renderItensVenda() {
     });
   });
 
+  // PREÇO (valida no blur)
   tbody.querySelectorAll("input[data-preco]").forEach(inp => {
-    inp.addEventListener("input", () => updateResumoOnly());
     inp.addEventListener("blur", () => {
       const idx = Number(inp.dataset.preco);
       const v = parseNumberBR(inp.value);
@@ -479,6 +481,7 @@ function renderItensVenda() {
     });
   });
 
+  // REMOVER
   tbody.querySelectorAll("button[data-rm]").forEach(btn => {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.rm);
@@ -491,6 +494,7 @@ function renderItensVenda() {
   document.getElementById("btnSalvarVenda").disabled = false;
   updateResumoOnly();
 }
+
 
 /* =========================
    RPC (SALVAR/EDITAR)
@@ -698,6 +702,31 @@ function setDefaultDateTimeNow() {
   const d = new Date();
   const isoLocal = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   document.getElementById("vData").value = isoLocal;
+}
+
+function iniciarNovaVenda() {
+  // sai do modo edição
+  state.editVendaId = null;
+  setModoEdicaoVenda(false);
+
+  // limpa itens
+  state.itens = [];
+  renderItensVenda();
+
+  // limpa campos
+  clearVendaItemFields(false);
+
+  setDefaultDateTimeNow();
+  document.getElementById("vCliente").value = "";
+  document.getElementById("vTelefone").value = "";
+  document.getElementById("vDesconto").value = "0,00";
+  document.getElementById("vObs").value = "";
+
+  // feedback visual
+  showToast("Nova venda iniciada.", "success");
+
+  // foco no produto
+  document.getElementById("vProdSearch")?.focus();
 }
 
 function bindVendas() {
