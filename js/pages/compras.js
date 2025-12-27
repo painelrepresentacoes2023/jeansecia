@@ -99,9 +99,25 @@ function garantirModalExcluirCompra() {
     </p>
 
     <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap;">
-      <button type="button" id="btnCancelarExcluir" class="btn" style="opacity:1;">Cancelar</button>
-      <button type="button" id="btnConfirmarExcluir" class="btn danger" style="opacity:1;">Excluir</button>
-    </div>
+  <button
+    type="button"
+    id="btnCancelarExcluir"
+    class="btn"
+    style="opacity:1 !important; color:#111 !important; background:#f1f1f1 !important; border:1px solid #d0d0d0 !important; filter:none !important;"
+  >
+    Cancelar
+  </button>
+
+  <button
+    type="button"
+    id="btnConfirmarExcluir"
+    class="btn danger"
+    style="opacity:1 !important; color:#fff !important; background:#e53935 !important; border:1px solid #e53935 !important; filter:none !important;"
+  >
+    Excluir
+  </button>
+</div>
+
   </div>
 `;
 
