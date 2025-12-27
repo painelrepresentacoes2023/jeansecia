@@ -64,51 +64,69 @@ async function loadFormasEnum() {
   return (data || []).map(x => x.value);
 }
 
-async function loadProdutosBase() {
+async function loadProdutosDoEstoque() {
   const { data, error } = await sb
-    .from("produtos")
-    .select(`id, nome, codigo, ativo, categorias ( nome )`)
-    .eq("ativo", true)
-    .order("nome", { ascending: true });
+    .from("vw_estoque_detalhado")
+    .select("produto_id, produto, codigo, categoria, categoria_id, produto_ativo, variacao_ativa, quantidade")
+    .eq("produto_ativo", true)
+    .eq("variacao_ativa", true)
+    .gt("quantidade", 0)
+    .order("produto", { ascending: true });
 
   if (error) throw error;
 
-  return (data || []).map(p => ({
-    id: p.id,
-    nome: p.nome,
-    codigo: p.codigo,
-    categoria_nome: p.categorias?.nome || "-",
-  }));
+  // agrupa por produto_id (sem repetir)
+  const map = new Map();
+  for (const r of (data || [])) {
+    if (!map.has(r.produto_id)) {
+      map.set(r.produto_id, {
+        id: r.produto_id,
+        nome: r.produto,
+        codigo: r.codigo,
+        categoria_nome: r.categoria || "-",
+      });
+    }
+  }
+  return Array.from(map.values());
 }
+
 
 async function loadCoresDoProduto(produtoId) {
   if (!produtoId) return [];
   if (state.produtoCores.has(produtoId)) return state.produtoCores.get(produtoId);
 
   const { data, error } = await sb
-    .from("produto_cores")
+    .from("vw_estoque_detalhado")
     .select("cor")
     .eq("produto_id", produtoId)
+    .eq("produto_ativo", true)
+    .eq("variacao_ativa", true)
+    .gt("quantidade", 0)
     .order("cor", { ascending: true });
 
   if (error) throw error;
 
-  const cores = (data || []).map(x => x.cor).filter(Boolean);
+  const cores = Array.from(new Set((data || []).map(x => x.cor).filter(Boolean)));
   state.produtoCores.set(produtoId, cores);
   return cores;
 }
 
 async function loadTamanhosDaVariacao(produtoId, cor) {
   const { data, error } = await sb
-    .from("variacoes")
-    .select("id, tamanho")
+    .from("vw_estoque_detalhado")
+    .select("variacao_id, tamanho, quantidade")
     .eq("produto_id", produtoId)
     .eq("cor", cor)
+    .eq("produto_ativo", true)
+    .eq("variacao_ativa", true)
+    .gt("quantidade", 0)
     .order("tamanho", { ascending: true });
 
   if (error) throw error;
-  return data || []; // [{id,tamanho}]
+
+  return data || []; // [{variacao_id,tamanho,quantidade}]
 }
+
 
 async function loadHistoricoVendas() {
   const { data, error } = await sb
@@ -377,9 +395,13 @@ async function onCorChange() {
   }
 
   selectedVariacoes = await loadTamanhosDaVariacao(selectedProduto.id, cor);
-  tamSel.innerHTML =
-    `<option value="">Selecione</option>` +
-    selectedVariacoes.map(v => `<option value="${escapeHtml(v.id)}">${escapeHtml(v.tamanho)}</option>`).join("");
+
+tamSel.innerHTML =
+  `<option value="">Selecione</option>` +
+  selectedVariacoes.map(v =>
+    `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (em estoque: ${Number(v.quantidade || 0)})</option>`
+  ).join("");
+
 }
 
 function clearVendaItemFields(keepProduto = true) {
@@ -915,7 +937,7 @@ export async function renderVendas() {
     setTimeout(async () => {
       try {
         state.formas = await loadFormasEnum();
-        state.produtos = await loadProdutosBase();
+        state.produtos = await loadProdutosDoEstoque();
 
         bindVendas();
         await reloadHistoricoVendas();
