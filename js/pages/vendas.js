@@ -67,28 +67,29 @@ async function loadFormasEnum() {
 async function loadProdutosDoEstoque() {
   const { data, error } = await sb
     .from("vw_estoque_detalhado")
-    .select("produto_id, produto, codigo, categoria, categoria_id, produto_ativo, variacao_ativa, quantidade")
+    .select("produto_id, produto, codigo_produto, categoria, quantidade")
+    .gt("quantidade", 0)
     .eq("produto_ativo", true)
     .eq("variacao_ativa", true)
-    .gt("quantidade", 0)
     .order("produto", { ascending: true });
 
   if (error) throw error;
 
-  // agrupa por produto_id (sem repetir)
+  // remove duplicados por produto_id
   const map = new Map();
   for (const r of (data || [])) {
     if (!map.has(r.produto_id)) {
       map.set(r.produto_id, {
         id: r.produto_id,
         nome: r.produto,
-        codigo: r.codigo,
+        codigo: r.codigo_produto,
         categoria_nome: r.categoria || "-",
       });
     }
   }
   return Array.from(map.values());
 }
+
 
 
 async function loadCoresDoProduto(produtoId) {
@@ -936,16 +937,35 @@ export async function renderVendas() {
 
     setTimeout(async () => {
       try {
+        // 1) carrega formas do enum
         state.formas = await loadFormasEnum();
+
+        // 2) carrega SOMENTE produtos que existem no estoque (quantidade > 0)
         state.produtos = await loadProdutosDoEstoque();
 
+        // 3) bind dos eventos (autocomplete, botões, etc)
         bindVendas();
+
+        // 4) histórico
         await reloadHistoricoVendas();
       } catch (e) {
         console.error(e);
         showToast(e?.message || "Erro ao iniciar Vendas.", "error");
       }
     }, 0);
+
+    return html;
+  } catch (e) {
+    console.error(e);
+    return `
+      <div class="card">
+        <div class="card-title">Vendas</div>
+        <div class="card-sub">Erro ao carregar esta tela. Veja o Console (F12).</div>
+      </div>
+    `;
+  }
+}
+
 
     return html;
   } catch (e) {
