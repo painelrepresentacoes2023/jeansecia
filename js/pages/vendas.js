@@ -58,12 +58,13 @@ window.__vendasState = state;
    LOADERS
 ========================= */
 async function loadFormasEnum() {
-  // depende do seu RPC enum_values já existente
-  const { data, error } = await sb.rpc("enum_values", { enum_type: "forma_pagamento" })
+  // Seu banco tem enum: forma_pagamento
+  const { data, error } = await sb.rpc("enum_values", { enum_type: "forma_pagamento" });
   if (error) throw error;
-  return (data || []).map(x => x.value);
+  return (data || []).map((x) => x.value);
 }
 
+// Produtos somente do que existe no estoque (quantidade > 0)
 async function loadProdutosDoEstoque() {
   const { data, error } = await sb
     .from("vw_estoque_detalhado")
@@ -77,7 +78,7 @@ async function loadProdutosDoEstoque() {
 
   // remove duplicados por produto_id
   const map = new Map();
-  for (const r of (data || [])) {
+  for (const r of data || []) {
     if (!map.has(r.produto_id)) {
       map.set(r.produto_id, {
         id: r.produto_id,
@@ -89,8 +90,6 @@ async function loadProdutosDoEstoque() {
   }
   return Array.from(map.values());
 }
-
-
 
 async function loadCoresDoProduto(produtoId) {
   if (!produtoId) return [];
@@ -107,7 +106,7 @@ async function loadCoresDoProduto(produtoId) {
 
   if (error) throw error;
 
-  const cores = Array.from(new Set((data || []).map(x => x.cor).filter(Boolean)));
+  const cores = Array.from(new Set((data || []).map((x) => x.cor).filter(Boolean)));
   state.produtoCores.set(produtoId, cores);
   return cores;
 }
@@ -124,10 +123,8 @@ async function loadTamanhosDaVariacao(produtoId, cor) {
     .order("tamanho", { ascending: true });
 
   if (error) throw error;
-
   return data || []; // [{variacao_id,tamanho,quantidade}]
 }
-
 
 async function loadHistoricoVendas() {
   const { data, error } = await sb
@@ -167,9 +164,10 @@ async function loadEstoquePorVariacoes(variacaoIds = []) {
   if (error) throw error;
 
   const m = new Map();
-  (data || []).forEach(r => m.set(r.variacao_id, Number(r.quantidade || 0)));
-  // se não veio no select, considera 0
-  ids.forEach(id => { if (!m.has(id)) m.set(id, 0); });
+  (data || []).forEach((r) => m.set(r.variacao_id, Number(r.quantidade || 0)));
+  ids.forEach((id) => {
+    if (!m.has(id)) m.set(id, 0);
+  });
   return m;
 }
 
@@ -338,27 +336,29 @@ function renderVendasLayout() {
    PROD SEARCH DROPDOWN
 ========================= */
 let selectedProduto = null;
-let selectedVariacoes = [];
 
 function showProdList(items) {
   const box = document.getElementById("vProdList");
+  if (!box) return;
+
   if (!items.length) {
     box.style.display = "none";
     box.innerHTML = "";
     return;
   }
+
   box.style.display = "block";
-  box.innerHTML = items.slice(0, 10).map(p => `
+  box.innerHTML = items.slice(0, 12).map((p) => `
     <div class="dropdown-item" data-id="${p.id}">
       <div style="font-weight:700;">${escapeHtml(p.nome)}</div>
-      <div class="small">${escapeHtml(p.codigo)} • ${escapeHtml(p.categoria_nome)}</div>
+      <div class="small">${escapeHtml(p.codigo || "")} • ${escapeHtml(p.categoria_nome || "-")}</div>
     </div>
   `).join("");
 
-  box.querySelectorAll(".dropdown-item").forEach(el => {
+  box.querySelectorAll(".dropdown-item").forEach((el) => {
     el.addEventListener("click", async () => {
       const id = el.dataset.id;
-      const p = state.produtos.find(x => x.id === id);
+      const p = state.produtos.find((x) => x.id === id);
       if (p) await selectProduto(p);
       box.style.display = "none";
     });
@@ -367,20 +367,26 @@ function showProdList(items) {
 
 async function selectProduto(p) {
   selectedProduto = p;
-  selectedVariacoes = [];
 
-  document.getElementById("vProdSearch").value = `${p.nome} (${p.codigo})`;
+  document.getElementById("vProdSearch").value = `${p.nome} (${p.codigo || ""})`;
   document.getElementById("vCategoriaView").value = p.categoria_nome || "-";
 
-  ["vCor","vTam","vQtd","vPreco","btnAddVendaItem","btnLimparVendaItem"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = false;
-  });
+  // habilita campos
+  document.getElementById("vCor").disabled = false;
+  document.getElementById("vTam").disabled = false;
+  document.getElementById("vQtd").disabled = false;
+  document.getElementById("vPreco").disabled = false;
+  document.getElementById("btnAddVendaItem").disabled = false;
+  document.getElementById("btnLimparVendaItem").disabled = false;
 
+  // carrega cores
   const cores = await loadCoresDoProduto(p.id);
   const corSel = document.getElementById("vCor");
-  corSel.innerHTML = `<option value="">Selecione</option>` + cores.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+  corSel.innerHTML =
+    `<option value="">Selecione</option>` +
+    cores.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 
+  // limpa tamanhos
   document.getElementById("vTam").innerHTML = `<option value="">Selecione a cor</option>`;
 }
 
@@ -390,19 +396,16 @@ async function onCorChange() {
   tamSel.innerHTML = `<option value="">Carregando...</option>`;
 
   if (!selectedProduto || !cor) {
-    selectedVariacoes = [];
     tamSel.innerHTML = `<option value="">Selecione a cor</option>`;
     return;
   }
 
-  selectedVariacoes = await loadTamanhosDaVariacao(selectedProduto.id, cor);
-
-tamSel.innerHTML =
-  `<option value="">Selecione</option>` +
-  selectedVariacoes.map(v =>
-    `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (em estoque: ${Number(v.quantidade || 0)})</option>`
-  ).join("");
-
+  const vars = await loadTamanhosDaVariacao(selectedProduto.id, cor);
+  tamSel.innerHTML =
+    `<option value="">Selecione</option>` +
+    vars.map((v) =>
+      `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (estoque: ${Number(v.quantidade || 0)})</option>`
+    ).join("");
 }
 
 function clearVendaItemFields(keepProduto = true) {
@@ -411,15 +414,16 @@ function clearVendaItemFields(keepProduto = true) {
 
   if (!keepProduto) {
     selectedProduto = null;
-    selectedVariacoes = [];
     document.getElementById("vProdSearch").value = "";
     document.getElementById("vCategoriaView").value = "";
     document.getElementById("vCor").innerHTML = `<option value="">Selecione o produto</option>`;
     document.getElementById("vTam").innerHTML = `<option value="">Selecione o produto</option>`;
-    ["vCor","vTam","vQtd","vPreco","btnAddVendaItem","btnLimparVendaItem"].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.disabled = true;
-    });
+    document.getElementById("vCor").disabled = true;
+    document.getElementById("vTam").disabled = true;
+    document.getElementById("vQtd").disabled = true;
+    document.getElementById("vPreco").disabled = true;
+    document.getElementById("btnAddVendaItem").disabled = true;
+    document.getElementById("btnLimparVendaItem").disabled = true;
   } else {
     document.getElementById("vCor").value = "";
     document.getElementById("vTam").innerHTML = `<option value="">Selecione a cor</option>`;
@@ -432,7 +436,7 @@ function clearVendaItemFields(keepProduto = true) {
    ITENS
 ========================= */
 function calcResumoVenda() {
-  const subtotal = state.itens.reduce((s, it) => s + (it.qtd * it.preco_unit), 0);
+  const subtotal = state.itens.reduce((s, it) => s + (Number(it.qtd || 0) * Number(it.preco_unit || 0)), 0);
   const desconto = parseNumberBR(document.getElementById("vDesconto").value);
   const total = Math.max(subtotal - desconto, 0);
   return { subtotal, desconto, total };
@@ -440,7 +444,7 @@ function calcResumoVenda() {
 
 function updateResumoOnly() {
   const { subtotal, desconto, total } = calcResumoVenda();
-  const totalPecas = state.itens.reduce((s, it) => s + it.qtd, 0);
+  const totalPecas = state.itens.reduce((s, it) => s + Number(it.qtd || 0), 0);
   document.getElementById("vResumo").textContent =
     `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
 }
@@ -460,18 +464,18 @@ function renderItensVenda() {
 
     return `
       <tr>
-        <td>${escapeHtml(it.produto_nome)} <span class="small">(${escapeHtml(it.produto_codigo)})</span></td>
+        <td>${escapeHtml(it.produto_nome)} <span class="small">(${escapeHtml(it.produto_codigo || "")})</span></td>
         <td>${escapeHtml(it.cor)}</td>
         <td>${escapeHtml(it.tamanho)}</td>
 
         <td>
           <input class="input" data-qtd="${idx}" type="number" min="1" step="1"
-                 value="${it.qtd}" style="width:80px; padding:8px;" />
+                 value="${Number(it.qtd || 1)}" style="width:80px; padding:8px;" />
         </td>
 
         <td>
           <input class="input" data-preco="${idx}" type="text"
-                 value="${String(it.preco_unit).replace(".", ",")}" style="width:120px; padding:8px;" />
+                 value="${String(Number(it.preco_unit || 0)).replace(".", ",")}" style="width:120px; padding:8px;" />
         </td>
 
         <td>${money(total)}</td>
@@ -484,7 +488,7 @@ function renderItensVenda() {
   }).join("");
 
   // QTD
-  tbody.querySelectorAll("input[data-qtd]").forEach(inp => {
+  tbody.querySelectorAll("input[data-qtd]").forEach((inp) => {
     inp.addEventListener("input", () => {
       const idx = Number(inp.dataset.qtd);
       const v = Math.max(1, Number(inp.value || 1));
@@ -494,7 +498,7 @@ function renderItensVenda() {
   });
 
   // PREÇO (valida no blur)
-  tbody.querySelectorAll("input[data-preco]").forEach(inp => {
+  tbody.querySelectorAll("input[data-preco]").forEach((inp) => {
     inp.addEventListener("blur", () => {
       const idx = Number(inp.dataset.preco);
       const v = parseNumberBR(inp.value);
@@ -505,7 +509,7 @@ function renderItensVenda() {
   });
 
   // REMOVER
-  tbody.querySelectorAll("button[data-rm]").forEach(btn => {
+  tbody.querySelectorAll("button[data-rm]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.rm);
       state.itens.splice(idx, 1);
@@ -517,7 +521,6 @@ function renderItensVenda() {
   document.getElementById("btnSalvarVenda").disabled = false;
   updateResumoOnly();
 }
-
 
 /* =========================
    RPC (SALVAR/EDITAR)
@@ -545,7 +548,7 @@ function renderHistoricoVendasTable(filterText = "") {
   const f = (filterText || "").trim().toLowerCase();
 
   if (f) {
-    rows = rows.filter(r => {
+    rows = rows.filter((r) => {
       const s = [
         r.cliente_nome,
         r.cliente_telefone,
@@ -563,7 +566,7 @@ function renderHistoricoVendasTable(filterText = "") {
     return;
   }
 
-  tbody.innerHTML = rows.map(r => `
+  tbody.innerHTML = rows.map((r) => `
     <tr>
       <td>${fmtDateTimeBR(r.data)}</td>
       <td>${escapeHtml(r.cliente_nome || "-")}</td>
@@ -576,11 +579,11 @@ function renderHistoricoVendasTable(filterText = "") {
     </tr>
   `).join("");
 
-  tbody.querySelectorAll("button[data-ver]").forEach(btn => {
+  tbody.querySelectorAll("button[data-ver]").forEach((btn) => {
     btn.addEventListener("click", async () => verItensVenda(btn.dataset.ver));
   });
 
-  tbody.querySelectorAll("button[data-editar]").forEach(btn => {
+  tbody.querySelectorAll("button[data-editar]").forEach((btn) => {
     btn.addEventListener("click", async () => editarVenda(btn.dataset.editar));
   });
 }
@@ -616,7 +619,7 @@ async function verItensVenda(vendaId) {
               </tr>
             </thead>
             <tbody>
-              ${itens.map(i => `
+              ${itens.map((i) => `
                 <tr>
                   <td>${escapeHtml(i.produto || "-")} <span class="small">(${escapeHtml(i.codigo_produto || "")})</span></td>
                   <td>${escapeHtml(i.cor || "-")}</td>
@@ -651,6 +654,8 @@ function setModoEdicaoVenda(on) {
   const btn = document.getElementById("btnSalvarVenda");
   const btnCancel = document.getElementById("btnCancelarVendaEdicao");
 
+  if (!titulo || !sub || !btn || !btnCancel) return;
+
   if (on) {
     titulo.textContent = "Editar Venda";
     sub.textContent = "Você está editando uma venda existente. Ao salvar, o estoque será ajustado automaticamente.";
@@ -666,7 +671,7 @@ function setModoEdicaoVenda(on) {
 
 async function editarVenda(vendaId) {
   try {
-    const venda = state.historico.find(x => x.venda_id === vendaId);
+    const venda = state.historico.find((x) => x.venda_id === vendaId);
     if (!venda) return showToast("Venda não encontrada.", "error");
 
     const itens = await loadVendaItens(vendaId);
@@ -686,7 +691,7 @@ async function editarVenda(vendaId) {
     document.getElementById("vDesconto").value = String(Number(venda.desconto_valor || 0)).replace(".", ",");
     document.getElementById("vObs").value = venda.observacoes || "";
 
-    state.itens = (itens || []).map(i => ({
+    state.itens = (itens || []).map((i) => ({
       variacao_id: i.variacao_id,
       produto_nome: i.produto,
       produto_codigo: i.codigo_produto,
@@ -719,7 +724,7 @@ function cancelarEdicaoVenda() {
 }
 
 /* =========================
-   BIND
+   BIND / NOVA VENDA
 ========================= */
 function setDefaultDateTimeNow() {
   const d = new Date();
@@ -728,15 +733,12 @@ function setDefaultDateTimeNow() {
 }
 
 function iniciarNovaVenda() {
-  // sai do modo edição
   state.editVendaId = null;
   setModoEdicaoVenda(false);
 
-  // limpa itens
   state.itens = [];
   renderItensVenda();
 
-  // limpa campos
   clearVendaItemFields(false);
 
   setDefaultDateTimeNow();
@@ -745,42 +747,49 @@ function iniciarNovaVenda() {
   document.getElementById("vDesconto").value = "0,00";
   document.getElementById("vObs").value = "";
 
-  // feedback visual
   showToast("Nova venda iniciada.", "success");
-
-  // foco no produto
   document.getElementById("vProdSearch")?.focus();
 }
 
+// evita bind duplicado
 function bindVendas() {
+  if (window.__vendasBound) return;
+  window.__vendasBound = true;
+
   setDefaultDateTimeNow();
 
+  // enum formas
   const selForma = document.getElementById("vForma");
-  selForma.innerHTML = (state.formas || []).map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+  selForma.innerHTML = (state.formas || []).map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
 
+  // filtro histórico
   document.getElementById("hVendaFiltro")?.addEventListener("input", (e) => {
     renderHistoricoVendasTable(e.target.value);
   });
 
+  // autocomplete produto
   const inp = document.getElementById("vProdSearch");
   inp?.addEventListener("input", () => {
     const q = (inp.value || "").trim().toLowerCase();
     if (!q || q.length < 2) return showProdList([]);
-    const items = state.produtos.filter(p =>
+    const items = (state.produtos || []).filter((p) =>
       (p.nome || "").toLowerCase().includes(q) ||
       (p.codigo || "").toLowerCase().includes(q)
     );
     showProdList(items);
   });
 
+  // fecha dropdown clicando fora
   document.addEventListener("click", (e) => {
     const box = document.getElementById("vProdList");
     const wrap = document.getElementById("vProdSearch");
     if (box && wrap && !box.contains(e.target) && e.target !== wrap) box.style.display = "none";
   });
 
+  // cor -> tamanhos
   document.getElementById("vCor")?.addEventListener("change", onCorChange);
 
+  // add item
   document.getElementById("btnAddVendaItem")?.addEventListener("click", () => {
     const msg = document.getElementById("vMsg");
     if (msg) msg.textContent = "";
@@ -789,7 +798,8 @@ function bindVendas() {
 
     const cor = document.getElementById("vCor").value;
     const variacaoId = document.getElementById("vTam").value;
-    const tamanho = document.getElementById("vTam").selectedOptions?.[0]?.textContent || "";
+    const tamanhoText = document.getElementById("vTam").selectedOptions?.[0]?.textContent || "";
+    const tamanho = String(tamanhoText).split(" (estoque:")[0].trim(); // tira o " (estoque: X)"
     const qtd = Math.max(1, Number(document.getElementById("vQtd").value || 1));
     const preco = parseNumberBR(document.getElementById("vPreco").value);
 
@@ -797,9 +807,10 @@ function bindVendas() {
     if (!variacaoId) return (msg.textContent = "Selecione o tamanho.");
     if (!preco || preco <= 0) return (msg.textContent = "Preço inválido.");
 
-    // soma qtd se mesma variação + mesmo preço
     const precoFix = Number(preco.toFixed(2));
-    const existing = state.itens.find(x => x.variacao_id === variacaoId && x.preco_unit === precoFix);
+
+    // se já existe o mesmo item (mesma variação + mesmo preço), soma qtd
+    const existing = state.itens.find((x) => x.variacao_id === variacaoId && x.preco_unit === precoFix);
     if (existing) existing.qtd += qtd;
     else {
       state.itens.push({
@@ -825,7 +836,7 @@ function bindVendas() {
 
   document.getElementById("vDesconto")?.addEventListener("input", () => updateResumoOnly());
 
-  // SALVAR VENDA (com validação de estoque antes)
+  // salvar venda
   document.getElementById("btnSalvarVenda")?.addEventListener("click", async () => {
     const msg = document.getElementById("vMsg");
     if (msg) msg.textContent = "";
@@ -838,12 +849,11 @@ function bindVendas() {
     const forma = document.getElementById("vForma").value;
     if (!forma) return (msg.textContent = "Selecione a forma.");
 
-    // valida estoque (lado client) pra não dar susto
+    // valida estoque client-side
     try {
-      const ids = state.itens.map(i => i.variacao_id);
+      const ids = state.itens.map((i) => i.variacao_id);
       const estoqueMap = await loadEstoquePorVariacoes(ids);
 
-      // soma qtd por variacao_id (se repetiu)
       const somaPorVar = new Map();
       for (const it of state.itens) {
         somaPorVar.set(it.variacao_id, (somaPorVar.get(it.variacao_id) || 0) + Number(it.qtd || 0));
@@ -861,7 +871,7 @@ function bindVendas() {
       return;
     }
 
-    const { subtotal, desconto, total } = calcResumoVenda();
+    const { desconto, total } = calcResumoVenda();
 
     const payload = {
       data: new Date(data).toISOString(),
@@ -870,7 +880,7 @@ function bindVendas() {
       cliente_telefone: document.getElementById("vTelefone").value.trim() || null,
       desconto_valor: Number(desconto.toFixed(2)),
       observacoes: document.getElementById("vObs").value.trim() || null,
-      itens: state.itens.map(it => ({
+      itens: state.itens.map((it) => ({
         variacao_id: it.variacao_id,
         quantidade: Number(it.qtd),
         preco_unit_aplicado: Number(it.preco_unit),
@@ -887,10 +897,8 @@ function bindVendas() {
       renderItensVenda();
       clearVendaItemFields(false);
 
-      if (state.editVendaId) {
-        state.editVendaId = null;
-        setModoEdicaoVenda(false);
-      }
+      state.editVendaId = null;
+      setModoEdicaoVenda(false);
 
       setDefaultDateTimeNow();
       document.getElementById("vCliente").value = "";
@@ -906,66 +914,46 @@ function bindVendas() {
       msg.textContent = e?.message || "Erro ao salvar venda.";
     }
   });
-   // BOTÃO GLOBAL "+ Nova Venda" (topo)
-const btnNovaVendaTop = document.getElementById("btnNovaVenda");
 
-if (btnNovaVendaTop) {
-  btnNovaVendaTop.onclick = (e) => {
-    e.preventDefault();
-
-    // se não estiver na aba vendas, navega
-    if (!location.hash.includes("vendas")) {
-      location.hash = "#vendas";
-
-      // espera a tela montar
-      setTimeout(() => iniciarNovaVenda(), 200);
-    } else {
-      iniciarNovaVenda();
-    }
-  };
+  // botão global do topo "+ Nova Venda"
+  const btnNovaVendaTop = document.getElementById("btnNovaVenda");
+  if (btnNovaVendaTop && !btnNovaVendaTop.__bound) {
+    btnNovaVendaTop.__bound = true;
+    btnNovaVendaTop.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (!location.hash.includes("vendas")) {
+        location.hash = "#vendas";
+        setTimeout(() => iniciarNovaVenda(), 250);
+      } else {
+        iniciarNovaVenda();
+      }
+    });
+  }
 }
-}
-
-
 
 /* =========================
    EXPORT
 ========================= */
 export async function renderVendas() {
   try {
+    // importante: a cada render, libera bind de novo (porque o DOM troca)
+    // mas o bindVendas tem guarda; então reseta aqui:
+    window.__vendasBound = false;
+
     const html = renderVendasLayout();
 
     setTimeout(async () => {
       try {
-        // 1) carrega formas do enum
         state.formas = await loadFormasEnum();
-
-        // 2) carrega SOMENTE produtos que existem no estoque (quantidade > 0)
         state.produtos = await loadProdutosDoEstoque();
 
-        // 3) bind dos eventos (autocomplete, botões, etc)
         bindVendas();
-
-        // 4) histórico
         await reloadHistoricoVendas();
       } catch (e) {
         console.error(e);
         showToast(e?.message || "Erro ao iniciar Vendas.", "error");
       }
     }, 0);
-
-    return html;
-  } catch (e) {
-    console.error(e);
-    return `
-      <div class="card">
-        <div class="card-title">Vendas</div>
-        <div class="card-sub">Erro ao carregar esta tela. Veja o Console (F12).</div>
-      </div>
-    `;
-  }
-}
-
 
     return html;
   } catch (e) {
