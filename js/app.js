@@ -32,27 +32,72 @@ async function requireAuth() {
   return true;
 }
 
-
 function setActive(route) {
-  els.navItems.forEach(b => b.classList.toggle("active", b.dataset.route === route));
+  els.navItems.forEach((b) =>
+    b.classList.toggle("active", b.dataset.route === route)
+  );
 }
 
-async function go(route) {
+function getRouteFromHash() {
+  const h = (location.hash || "").replace("#", "").trim();
+  return h;
+}
+
+function setHash(route) {
+  // não fica gerando histórico infinito; só troca o hash
+  if (location.hash !== `#${route}`) {
+    history.replaceState(null, "", `#${route}`);
+  }
+}
+
+function saveLastRoute(route) {
+  localStorage.setItem("ultima_pagina", route);
+}
+
+function getInitialRoute() {
+  const hashRoute = getRouteFromHash();
+  if (hashRoute && routes[hashRoute]) return hashRoute;
+
+  const saved = localStorage.getItem("ultima_pagina");
+  if (saved && routes[saved]) return saved;
+
+  return "dashboard";
+}
+
+async function go(route, opts = { syncUrl: true, save: true }) {
   const ok = await requireAuth();
   if (!ok) return;
 
-  const r = routes[route] || routes.dashboard;
+  const finalRoute = routes[route] ? route : "dashboard";
+  const r = routes[finalRoute];
+
   els.pageTitle.textContent = r.title;
   els.breadcrumbs.textContent = r.crumbs;
-  setActive(route);
+  setActive(finalRoute);
+
+  if (opts?.save) saveLastRoute(finalRoute);
+  if (opts?.syncUrl) setHash(finalRoute);
+
   els.content.innerHTML = await r.render();
 }
 
-els.navItems.forEach(btn => btn.addEventListener("click", () => go(btn.dataset.route)));
+// Clique no menu
+els.navItems.forEach((btn) =>
+  btn.addEventListener("click", () => go(btn.dataset.route))
+);
 
+// Logout
 els.btnLogout.addEventListener("click", async () => {
   await sb.auth.signOut();
-  location.reload();
+  localStorage.removeItem("ultima_pagina");
+  location.href = "./login.html";
 });
 
-go("dashboard");
+// Se mudar o hash manualmente (ou voltar/avançar), respeita
+window.addEventListener("hashchange", () => {
+  const route = getInitialRoute();
+  go(route, { syncUrl: true, save: true });
+});
+
+// Inicial: abre a última página (ou hash) — NÃO força dashboard
+go(getInitialRoute(), { syncUrl: true, save: true });
