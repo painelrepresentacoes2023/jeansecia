@@ -72,7 +72,10 @@ async function loadTamanhosByCategoria(categoriaId) {
 
 async function loadEstoque(filters) {
   // Usa a VIEW vw_estoque_detalhado
-  let q = sb.from("vw_estoque_detalhado").select("*");
+  let q = sb.from("vw_estoque_detalhado")
+  .select("*")
+  .gt("quantidade", 0);
+
 
   if (filters.categoria_id) q = q.eq("categoria_id", filters.categoria_id);
   if (filters.produto_id) q = q.eq("produto_id", filters.produto_id);
