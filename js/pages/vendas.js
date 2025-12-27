@@ -59,7 +59,7 @@ window.__vendasState = state;
 ========================= */
 async function loadFormasEnum() {
   // depende do seu RPC enum_values já existente
-  const { data, error } = await sb.rpc("enum_values", { enum_type: "forma" });
+  const { data, error } = await sb.rpc("enum_values", { enum_type: "forma_pagamento" })
   if (error) throw error;
   return (data || []).map(x => x.value);
 }
