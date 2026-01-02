@@ -755,6 +755,7 @@ async function excluirVenda(vendaId) {
     if (state.editVendaId === vid) cancelarEdicaoVenda();
 
     await reloadHistoricoVendas();
+     window.dispatchEvent(new Event("forceRefreshEstoque"));
     showToast("Venda excluída (estoque devolvido).", "success");
   } catch (e) {
     console.error(e);
@@ -1045,6 +1046,7 @@ function bindVendas() {
       document.getElementById("vObs").value = "";
 
       await reloadHistoricoVendas();
+       window.dispatchEvent(new Event("forceRefreshEstoque"));
       msg.textContent = `OK ✅ Total: ${money(total)}`;
       setTimeout(() => (msg.textContent = ""), 1200);
     } catch (e) {
