@@ -48,6 +48,16 @@ function isoFromDatetimeLocal(value) {
   return d.toISOString();
 }
 
+function normId(v) {
+  if (v == null) return "";
+  return String(v).trim();
+}
+
+function clamp0(n) {
+  const x = Number(n || 0);
+  return x < 0 ? 0 : x;
+}
+
 /* =========================
    STATE
 ========================= */
@@ -55,7 +65,7 @@ const state = {
   produtos: [],            // [{id,nome,codigo,categoria_nome}]
   produtoCores: new Map(), // produto_id -> [cor]
   historico: [],
-  itens: [],               // carrinho: [{variacao_id, produto_nome, produto_codigo, cor, tamanho, qtd, preco_unit}]
+  itens: [],               // [{variacao_id, produto_nome, produto_codigo, cor, tamanho, qtd, preco_unit}]
   editVendaId: null,
   formas: [],
 };
@@ -72,7 +82,6 @@ async function loadFormasEnum() {
   return (data || []).map((x) => x.value);
 }
 
-// Produtos somente do que existe no estoque (quantidade > 0)
 async function loadProdutosDoEstoque() {
   const { data, error } = await sb
     .from("vw_estoque_detalhado")
@@ -84,12 +93,12 @@ async function loadProdutosDoEstoque() {
 
   if (error) throw error;
 
-  // remove duplicados por produto_id
   const map = new Map();
   for (const r of data || []) {
-    if (!map.has(r.produto_id)) {
-      map.set(r.produto_id, {
-        id: r.produto_id,
+    const pid = normId(r.produto_id);
+    if (!map.has(pid)) {
+      map.set(pid, {
+        id: pid,
         nome: r.produto,
         codigo: r.codigo_produto,
         categoria_nome: r.categoria || "-",
@@ -100,13 +109,14 @@ async function loadProdutosDoEstoque() {
 }
 
 async function loadCoresDoProduto(produtoId) {
-  if (!produtoId) return [];
-  if (state.produtoCores.has(produtoId)) return state.produtoCores.get(produtoId);
+  const pid = normId(produtoId);
+  if (!pid) return [];
+  if (state.produtoCores.has(pid)) return state.produtoCores.get(pid);
 
   const { data, error } = await sb
     .from("vw_estoque_detalhado")
     .select("cor")
-    .eq("produto_id", produtoId)
+    .eq("produto_id", pid)
     .eq("produto_ativo", true)
     .eq("variacao_ativa", true)
     .gt("quantidade", 0)
@@ -115,15 +125,16 @@ async function loadCoresDoProduto(produtoId) {
   if (error) throw error;
 
   const cores = Array.from(new Set((data || []).map((x) => x.cor).filter(Boolean)));
-  state.produtoCores.set(produtoId, cores);
+  state.produtoCores.set(pid, cores);
   return cores;
 }
 
 async function loadTamanhosDaVariacao(produtoId, cor) {
+  const pid = normId(produtoId);
   const { data, error } = await sb
     .from("vw_estoque_detalhado")
     .select("variacao_id, tamanho, quantidade")
-    .eq("produto_id", produtoId)
+    .eq("produto_id", pid)
     .eq("cor", cor)
     .eq("produto_ativo", true)
     .eq("variacao_ativa", true)
@@ -131,7 +142,10 @@ async function loadTamanhosDaVariacao(produtoId, cor) {
     .order("tamanho", { ascending: true });
 
   if (error) throw error;
-  return data || []; // [{variacao_id,tamanho,quantidade}]
+  return (data || []).map((r) => ({
+    ...r,
+    variacao_id: normId(r.variacao_id),
+  }));
 }
 
 async function loadHistoricoVendas() {
@@ -143,25 +157,35 @@ async function loadHistoricoVendas() {
     .limit(120);
 
   if (error) throw error;
-  return data || [];
+  return (data || []).map((r) => ({
+    ...r,
+    venda_id: normId(r.venda_id),
+  }));
 }
 
 async function loadVendaItens(vendaId) {
+  const vid = normId(vendaId);
   const { data, error } = await sb
     .from("vw_venda_itens_detalhe")
     .select("*")
-    .eq("venda_id", vendaId)
+    .eq("venda_id", vid)
     .order("produto", { ascending: true })
     .order("cor", { ascending: true })
     .order("tamanho", { ascending: true });
 
   if (error) throw error;
-  return data || [];
+
+  return (data || []).map((r) => ({
+    ...r,
+    venda_id: normId(r.venda_id),
+    venda_item_id: normId(r.venda_item_id),
+    variacao_id: normId(r.variacao_id),
+    produto_id: normId(r.produto_id),
+  }));
 }
 
-// Estoque atual por variacao_id (para validar antes de salvar)
 async function loadEstoquePorVariacoes(variacaoIds = []) {
-  const ids = Array.from(new Set((variacaoIds || []).filter(Boolean)));
+  const ids = Array.from(new Set((variacaoIds || []).map(normId).filter(Boolean)));
   if (!ids.length) return new Map();
 
   const { data, error } = await sb
@@ -172,10 +196,67 @@ async function loadEstoquePorVariacoes(variacaoIds = []) {
   if (error) throw error;
 
   const m = new Map();
-  (data || []).forEach((r) => m.set(r.variacao_id, Number(r.quantidade || 0)));
+  (data || []).forEach((r) => m.set(normId(r.variacao_id), Number(r.quantidade || 0)));
   ids.forEach((id) => {
     if (!m.has(id)) m.set(id, 0);
   });
+  return m;
+}
+
+/* =========================
+   ESTOQUE (AJUSTE REAL)
+   - delta > 0: devolve estoque
+   - delta < 0: dá baixa
+========================= */
+async function applyEstoqueDeltas(deltaMap) {
+  // deltaMap: Map(variacao_id -> delta)
+  const entries = Array.from(deltaMap.entries()).filter(([vid, d]) => normId(vid) && Number(d || 0) !== 0);
+  if (!entries.length) return;
+
+  for (const [variacaoIdRaw, deltaRaw] of entries) {
+    const variacao_id = normId(variacaoIdRaw);
+    const delta = Number(deltaRaw || 0);
+
+    // pega atual
+    const { data: row, error: selErr } = await sb
+      .from("estoque")
+      .select("variacao_id, quantidade")
+      .eq("variacao_id", variacao_id)
+      .maybeSingle();
+
+    if (selErr) throw selErr;
+
+    const atual = Number(row?.quantidade || 0);
+    const novo = clamp0(atual + delta);
+
+    // upsert (garante que existe)
+    const { error: upErr } = await sb
+      .from("estoque")
+      .upsert({ variacao_id, quantidade: novo }, { onConflict: "variacao_id" });
+
+    if (upErr) throw upErr;
+  }
+}
+
+function buildQtyMapFromStateItens() {
+  const m = new Map();
+  for (const it of state.itens || []) {
+    const vid = normId(it.variacao_id);
+    const qtd = Number(it.qtd || 0);
+    if (!vid || qtd <= 0) continue;
+    m.set(vid, (m.get(vid) || 0) + qtd);
+  }
+  return m;
+}
+
+function buildQtyMapFromVendaItensRows(rows = []) {
+  const m = new Map();
+  for (const r of rows || []) {
+    const vid = normId(r.variacao_id);
+    const qtd = Number(r.quantidade || 0);
+    if (!vid || qtd <= 0) continue;
+    m.set(vid, (m.get(vid) || 0) + qtd);
+  }
   return m;
 }
 
@@ -360,7 +441,7 @@ function showProdList(items) {
     .slice(0, 12)
     .map(
       (p) => `
-    <div class="dropdown-item" data-id="${p.id}">
+    <div class="dropdown-item" data-id="${escapeHtml(p.id)}">
       <div style="font-weight:700;">${escapeHtml(p.nome)}</div>
       <div class="small">${escapeHtml(p.codigo || "")} • ${escapeHtml(p.categoria_nome || "-")}</div>
     </div>
@@ -370,8 +451,8 @@ function showProdList(items) {
 
   box.querySelectorAll(".dropdown-item").forEach((el) => {
     el.addEventListener("click", async () => {
-      const id = el.dataset.id;
-      const p = state.produtos.find((x) => x.id === id);
+      const id = normId(el.dataset.id);
+      const p = (state.produtos || []).find((x) => normId(x.id) === id);
       if (p) await selectProduto(p);
       box.style.display = "none";
     });
@@ -384,7 +465,6 @@ async function selectProduto(p) {
   document.getElementById("vProdSearch").value = `${p.nome} (${p.codigo || ""})`;
   document.getElementById("vCategoriaView").value = p.categoria_nome || "-";
 
-  // habilita campos
   document.getElementById("vCor").disabled = false;
   document.getElementById("vTam").disabled = false;
   document.getElementById("vQtd").disabled = false;
@@ -392,13 +472,12 @@ async function selectProduto(p) {
   document.getElementById("btnAddVendaItem").disabled = false;
   document.getElementById("btnLimparVendaItem").disabled = false;
 
-  // carrega cores
   const cores = await loadCoresDoProduto(p.id);
   const corSel = document.getElementById("vCor");
   corSel.innerHTML =
-    `<option value="">Selecione</option>` + cores.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+    `<option value="">Selecione</option>` +
+    cores.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 
-  // limpa tamanhos
   document.getElementById("vTam").innerHTML = `<option value="">Selecione a cor</option>`;
 }
 
@@ -504,7 +583,6 @@ function renderItensVenda() {
     })
     .join("");
 
-  // QTD
   tbody.querySelectorAll("input[data-qtd]").forEach((inp) => {
     inp.addEventListener("input", () => {
       const idx = Number(inp.dataset.qtd);
@@ -514,7 +592,6 @@ function renderItensVenda() {
     });
   });
 
-  // PREÇO (valida no blur)
   tbody.querySelectorAll("input[data-preco]").forEach((inp) => {
     inp.addEventListener("blur", () => {
       const idx = Number(inp.dataset.preco);
@@ -525,7 +602,6 @@ function renderItensVenda() {
     });
   });
 
-  // REMOVER
   tbody.querySelectorAll("button[data-rm]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const idx = Number(btn.dataset.rm);
@@ -550,45 +626,31 @@ async function salvarVendaRPC(payload, vendaId = null) {
   } else {
     const { data: newId, error } = await sb.rpc("registrar_venda", { payload });
     if (error) throw error;
-    return newId;
+    return normId(newId);
   }
 }
 
 async function salvarItensVenda(vendaId) {
-  const itens = state.itens.map((it) => ({
-    venda_id: vendaId,
-    variacao_id: it.variacao_id,
-    quantidade: Number(it.qtd),
-    preco_unit_aplicado: Number(it.preco_unit),
-  }));
+  const vid = normId(vendaId);
 
-  // sempre regrava (simples e confiável)
-  const { error: delErr } = await sb.from("venda_itens").delete().eq("venda_id", vendaId);
+  const itens = (state.itens || []).map((it) => {
+    const qtd = Number(it.qtd || 0);
+    const preco = Number(it.preco_unit || 0);
+    return {
+      venda_id: vid,
+      variacao_id: normId(it.variacao_id),
+      quantidade: qtd,
+      preco_unit_aplicado: preco,
+      subtotal: Number((qtd * preco).toFixed(2)), // evita NOT NULL
+    };
+  });
+
+  const { error: delErr } = await sb.from("venda_itens").delete().eq("venda_id", vid);
   if (delErr) throw delErr;
 
   if (itens.length > 0) {
     const { error: insErr } = await sb.from("venda_itens").insert(itens);
     if (insErr) throw insErr;
-  }
-}
-
-async function excluirVenda(vendaId) {
-  try {
-    showToast("Excluindo venda...", "info");
-
-    const { error: e1 } = await sb.from("venda_itens").delete().eq("venda_id", vendaId);
-    if (e1) throw e1;
-
-    const { error: e2 } = await sb.from("vendas").delete().eq("id", vendaId);
-    if (e2) throw e2;
-
-    if (state.editVendaId === vendaId) cancelarEdicaoVenda();
-
-    await reloadHistoricoVendas();
-    showToast("Venda excluída.", "success");
-  } catch (e) {
-    console.error(e);
-    showToast(e?.message || "Erro ao excluir venda.", "error");
   }
 }
 
@@ -627,9 +689,9 @@ function renderHistoricoVendasTable(filterText = "") {
       }</td>
       <td>${money(r.total || 0)}</td>
       <td style="display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="btn" data-ver="${r.venda_id}">Ver itens</button>
-        <button class="btn primary" data-editar="${r.venda_id}">Editar</button>
-        <button class="btn danger" data-excluir="${r.venda_id}">Excluir</button>
+        <button class="btn" data-ver="${escapeHtml(r.venda_id)}">Ver itens</button>
+        <button class="btn primary" data-editar="${escapeHtml(r.venda_id)}">Editar</button>
+        <button class="btn danger" data-excluir="${escapeHtml(r.venda_id)}">Excluir</button>
       </td>
     </tr>
   `
@@ -638,7 +700,6 @@ function renderHistoricoVendasTable(filterText = "") {
 
   tbody.querySelectorAll("button[data-ver]").forEach((btn) => {
     btn.addEventListener("click", async () => abrirModalItensVenda(btn.dataset.ver));
-
   });
 
   tbody.querySelectorAll("button[data-editar]").forEach((btn) => {
@@ -655,59 +716,49 @@ async function reloadHistoricoVendas() {
   renderHistoricoVendasTable(document.getElementById("hVendaFiltro")?.value || "");
 }
 
-async function verItensVenda(vendaId) {
-  const box = document.getElementById("hVendaItensBox");
-  if (box) box.textContent = "Carregando itens...";
+/* =========================
+   EXCLUIR VENDA (COM DEVOLUÇÃO ESTOQUE)
+========================= */
+async function excluirVenda(vendaId) {
+  const vid = normId(vendaId);
+  if (!vid) return;
 
   try {
-    const itens = await loadVendaItens(vendaId);
+    showToast("Excluindo venda...", "info");
 
-    if (!itens.length) {
-      if (box) box.textContent = "Nenhum item nessa venda.";
-      return;
+    // pega itens pra devolver estoque
+    const itensOld = await loadVendaItens(vid);
+    const oldMap = buildQtyMapFromVendaItensRows(itensOld);
+
+    // 1) devolve estoque (se der ruim, não deleta nada)
+    await applyEstoqueDeltas(oldMap);
+
+    // 2) deleta venda_itens e vendas
+    const { error: e1 } = await sb.from("venda_itens").delete().eq("venda_id", vid);
+    if (e1) {
+      // rollback estoque
+      const rollback = new Map();
+      for (const [k, v] of oldMap.entries()) rollback.set(k, -v);
+      await applyEstoqueDeltas(rollback);
+      throw e1;
     }
 
-    const html = `
-      <div class="card" style="margin-top:10px;">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
-          <div style="font-weight:700;">Itens da venda</div>
-          <button class="btn" id="btnFecharVendaItens">Fechar</button>
-        </div>
-        <div class="table-wrap" style="margin-top:10px;">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Produto</th><th>Cor</th><th>Tam</th><th>Qtd</th><th>Preço</th><th>Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${itens
-                .map(
-                  (i) => `
-                <tr>
-                  <td>${escapeHtml(i.produto || "-")} <span class="small">(${escapeHtml(i.codigo_produto || "")})</span></td>
-                  <td>${escapeHtml(i.cor || "-")}</td>
-                  <td>${escapeHtml(i.tamanho || "-")}</td>
-                  <td>${Number(i.quantidade || 0)}</td>
-                  <td>${money(i.preco_unit || 0)}</td>
-                  <td>${money(Number(i.quantidade || 0) * Number(i.preco_unit || 0))}</td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    `;
+    const { error: e2 } = await sb.from("vendas").delete().eq("id", vid);
+    if (e2) {
+      // rollback estoque
+      const rollback = new Map();
+      for (const [k, v] of oldMap.entries()) rollback.set(k, -v);
+      await applyEstoqueDeltas(rollback);
+      throw e2;
+    }
 
-    if (box) box.innerHTML = html;
-    document.getElementById("btnFecharVendaItens")?.addEventListener("click", () => {
-      if (box) box.innerHTML = "";
-    });
+    if (state.editVendaId === vid) cancelarEdicaoVenda();
+
+    await reloadHistoricoVendas();
+    showToast("Venda excluída (estoque devolvido).", "success");
   } catch (e) {
     console.error(e);
-    if (box) box.textContent = "Erro ao carregar itens da venda.";
+    showToast(e?.message || "Erro ao excluir venda.", "error");
   }
 }
 
@@ -736,17 +787,20 @@ function setModoEdicaoVenda(on) {
 }
 
 async function editarVenda(vendaId) {
+  const vid = normId(vendaId);
   try {
-    const venda = state.historico.find((x) => x.venda_id === vendaId);
+    const venda = (state.historico || []).find((x) => normId(x.venda_id) === vid);
     if (!venda) return showToast("Venda não encontrada.", "error");
 
-    const itens = await loadVendaItens(vendaId);
+    const itens = await loadVendaItens(vid);
 
-    state.editVendaId = vendaId;
+    state.editVendaId = vid;
     setModoEdicaoVenda(true);
 
     const d = new Date(venda.data);
-    const isoLocal = Number.isNaN(d.getTime()) ? "" : new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const isoLocal = Number.isNaN(d.getTime())
+      ? ""
+      : new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
     document.getElementById("vData").value = isoLocal;
     document.getElementById("vForma").value = venda.forma;
@@ -756,14 +810,14 @@ async function editarVenda(vendaId) {
     document.getElementById("vObs").value = venda.observacoes || "";
 
     state.itens = (itens || []).map((i) => ({
-  variacao_id: i.variacao_id,
-  produto_nome: i.produto,
-  produto_codigo: i.codigo_produto,
-  cor: i.cor,
-  tamanho: i.tamanho,
-  qtd: Number(i.quantidade || 1),
-  preco_unit: Number(i.preco_unit || 0),
-}));
+      variacao_id: normId(i.variacao_id),
+      produto_nome: i.produto,
+      produto_codigo: i.codigo_produto,
+      cor: i.cor,
+      tamanho: i.tamanho,
+      qtd: Number(i.quantidade || 1),
+      preco_unit: Number(i.preco_unit || 0),
+    }));
 
     renderItensVenda();
     showToast("Venda carregada para edição.", "success");
@@ -826,7 +880,6 @@ function bindVendas() {
   const selForma = document.getElementById("vForma");
   selForma.innerHTML = (state.formas || []).map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
 
-  // filtro histórico
   document.getElementById("hVendaFiltro")?.addEventListener("input", (e) => {
     renderHistoricoVendasTable(e.target.value);
   });
@@ -860,7 +913,7 @@ function bindVendas() {
     if (!selectedProduto) return (msg.textContent = "Selecione um produto.");
 
     const cor = document.getElementById("vCor").value;
-    const variacaoId = document.getElementById("vTam").value;
+    const variacaoId = normId(document.getElementById("vTam").value);
     const tamanhoText = document.getElementById("vTam").selectedOptions?.[0]?.textContent || "";
     const tamanho = String(tamanhoText).split(" (estoque:")[0].trim();
     const qtd = Math.max(1, Number(document.getElementById("vQtd").value || 1));
@@ -872,8 +925,7 @@ function bindVendas() {
 
     const precoFix = Number(preco.toFixed(2));
 
-    // se já existe o mesmo item (mesma variação + mesmo preço), soma qtd
-    const existing = state.itens.find((x) => x.variacao_id === variacaoId && x.preco_unit === precoFix);
+    const existing = state.itens.find((x) => normId(x.variacao_id) === variacaoId && Number(x.preco_unit) === precoFix);
     if (existing) existing.qtd += qtd;
     else {
       state.itens.push({
@@ -898,7 +950,7 @@ function bindVendas() {
   document.getElementById("btnCancelarVendaEdicao")?.addEventListener("click", cancelarEdicaoVenda);
   document.getElementById("vDesconto")?.addEventListener("input", () => updateResumoOnly());
 
-  // salvar venda (AGORA COMPLETO: cabeçalho + itens)
+  // salvar venda (cabeçalho + itens + estoque)
   document.getElementById("btnSalvarVenda")?.addEventListener("click", async () => {
     const msg = document.getElementById("vMsg");
     if (msg) msg.textContent = "";
@@ -911,53 +963,44 @@ function bindVendas() {
     const forma = document.getElementById("vForma").value;
     if (!forma) return (msg.textContent = "Selecione a forma.");
 
-    // valida estoque client-side
+    // pega itens antigos (se edição)
+    let oldItens = [];
     try {
-      const ids = state.itens.map((i) => i.variacao_id);
-const estoqueMap = await loadEstoquePorVariacoes(ids);
+      if (state.editVendaId) oldItens = await loadVendaItens(state.editVendaId);
+    } catch (e) {
+      console.error(e);
+      return (msg.textContent = "Erro ao carregar itens antigos da venda.");
+    }
 
-// ✅ se estiver editando, soma "de volta" o que já era dessa venda
-const devolucaoMap = new Map();
-if (state.editVendaId) {
-  const antigos = await loadVendaItens(state.editVendaId); // vw_venda_itens_detalhe
-  for (const a of (antigos || [])) {
-    const vid = a.variacao_id;
-    const qtd = Number(a.quantidade || 0);
-    devolucaoMap.set(vid, (devolucaoMap.get(vid) || 0) + qtd);
-  }
-}
+    // valida estoque
+    try {
+      const newMap = buildQtyMapFromStateItens();
+      const oldMap = buildQtyMapFromVendaItensRows(oldItens);
 
-const somaPorVar = new Map();
-for (const it of state.itens) {
-  somaPorVar.set(it.variacao_id, (somaPorVar.get(it.variacao_id) || 0) + Number(it.qtd || 0));
-}
+      const ids = Array.from(new Set([...newMap.keys(), ...oldMap.keys()]));
+      const estoqueMap = await loadEstoquePorVariacoes(ids);
 
-for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
-  const emEstoque = estoqueMap.get(variacaoId) ?? 0;
-  const devolvendo = devolucaoMap.get(variacaoId) ?? 0;
+      for (const [variacaoId, qtdNova] of newMap.entries()) {
+        const emEstoque = estoqueMap.get(variacaoId) ?? 0;
+        const devolvendo = oldMap.get(variacaoId) ?? 0; // só na edição funciona
+        const disponivel = emEstoque + devolvendo;
 
-  // estoque "real" para validação durante edição
-  const disponivel = emEstoque + devolvendo;
-
-  if (disponivel < qtdVendendo) {
-    throw new Error(
-      `Estoque insuficiente. Disponível=${disponivel} (estoque=${emEstoque} + devolução=${devolvendo}) / Tentando=${qtdVendendo}`
-    );
-  }
-}
-
+        if (disponivel < qtdNova) {
+          throw new Error(
+            `Estoque insuficiente. Disponível=${disponivel} (estoque=${emEstoque} + devolução=${devolvendo}) / Tentando=${qtdNova}`
+          );
+        }
+      }
     } catch (e) {
       console.error(e);
       msg.textContent = e?.message || "Estoque insuficiente.";
       return;
     }
 
-    // resumo (sem variáveis duplicadas)
     const { subtotal, desconto, total } = calcResumoVenda();
 
-    // payload (compatível com RPC)
     const payload = {
-      data: isoFromDatetimeLocal(dataLocal), // respeita a data/hora escolhida
+      data: isoFromDatetimeLocal(dataLocal),
       forma,
       cliente_nome: document.getElementById("vCliente").value.trim() || null,
       cliente_telefone: document.getElementById("vTelefone").value.trim() || null,
@@ -969,11 +1012,22 @@ for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
 
     msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
 
+    // delta estoque (devolve old, baixa new)
+    const deltaMap = new Map();
+    const oldMap2 = buildQtyMapFromVendaItensRows(oldItens);
+    const newMap2 = buildQtyMapFromStateItens();
+
+    for (const [vid, qtdOld] of oldMap2.entries()) deltaMap.set(vid, (deltaMap.get(vid) || 0) + qtdOld);
+    for (const [vid, qtdNew] of newMap2.entries()) deltaMap.set(vid, (deltaMap.get(vid) || 0) - qtdNew);
+
     try {
-      // 1) salva/atualiza cabeçalho e pega o ID
+      // 1) salva/atualiza cabeçalho
       const vendaId = await salvarVendaRPC(payload, state.editVendaId);
 
-      // 2) salva itens
+      // 2) ajusta estoque (se der ruim, não grava itens)
+      await applyEstoqueDeltas(deltaMap);
+
+      // 3) grava itens
       await salvarItensVenda(vendaId);
 
       // reset UI
@@ -995,6 +1049,16 @@ for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
       setTimeout(() => (msg.textContent = ""), 1200);
     } catch (e) {
       console.error(e);
+
+      // rollback estoque (melhor tentativa)
+      try {
+        const rollback = new Map();
+        for (const [k, v] of deltaMap.entries()) rollback.set(k, -v);
+        await applyEstoqueDeltas(rollback);
+      } catch (rb) {
+        console.error("Rollback estoque falhou:", rb);
+      }
+
       msg.textContent = e?.message || "Erro ao salvar venda.";
     }
   });
@@ -1018,8 +1082,6 @@ for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
 /* =========================
    MODAL ITENS (EDITAR VENDA)
 ========================= */
-
-// cria modal uma vez
 function ensureModal() {
   if (document.getElementById("modalVendaItens")) return;
 
@@ -1073,24 +1135,21 @@ function closeModalItens() {
   if (m) m.style.display = "none";
 }
 
-/**
- * Abre modal de itens da venda e permite editar cada item (qtd e preço agora)
- * Depois a gente habilita trocar variação (cor/tamanho) se você quiser.
- */
 async function abrirModalItensVenda(vendaId) {
+  const vid = normId(vendaId);
   openModalItens();
 
   const info = document.getElementById("modalVendaItensInfo");
   const body = document.getElementById("modalVendaItensBody");
   const btnSalvar = document.getElementById("btnSalvarModalVendaItens");
 
-  info.textContent = `Venda: ${vendaId}`;
+  info.textContent = `Venda: ${vid}`;
   body.textContent = "Carregando itens...";
 
-  // carrega itens
+  // carrega itens originais
   let itens = [];
   try {
-    itens = await loadVendaItens(vendaId); // usa sua função existente
+    itens = await loadVendaItens(vid);
   } catch (e) {
     console.error(e);
     body.textContent = "Erro ao carregar itens.";
@@ -1102,10 +1161,9 @@ async function abrirModalItensVenda(vendaId) {
     return;
   }
 
-  // snapshot editável local
-  const edit = itens.map((i) => ({
-    venda_item_id: i.venda_item_id,
-    variacao_id: i.variacao_id,
+  const original = itens.map((i) => ({
+    venda_item_id: normId(i.venda_item_id),
+    variacao_id: normId(i.variacao_id),
     produto: i.produto,
     codigo_produto: i.codigo_produto,
     cor: i.cor,
@@ -1114,7 +1172,9 @@ async function abrirModalItensVenda(vendaId) {
     preco_unit: Number(i.preco_unit || 0),
   }));
 
-  // render
+  // snapshot editável
+  const edit = original.map((x) => ({ ...x }));
+
   const render = () => {
     body.innerHTML = `
       <div class="table-wrap">
@@ -1152,7 +1212,7 @@ async function abrirModalItensVenda(vendaId) {
                   <td>${money(total)}</td>
 
                   <td style="display:flex; gap:8px; flex-wrap:wrap;">
-                    <button class="btn danger" data-mdel="${idx}">Excluir item</button>
+                    <button class="btn danger" data-mdel="${idx}">Remover</button>
                   </td>
                 </tr>
               `;
@@ -1161,20 +1221,18 @@ async function abrirModalItensVenda(vendaId) {
         </table>
       </div>
       <div class="small" style="margin-top:10px;">
-        Dica: você pode ajustar quantidade e preço. Depois clique em <b>Salvar alterações</b>.
+        Ajuste quantidade e preço. Depois clique em <b>Salvar alterações</b>.
       </div>
     `;
 
-    // binds qtd
     body.querySelectorAll("input[data-mqtd]").forEach((inp) => {
       inp.addEventListener("input", () => {
         const idx = Number(inp.dataset.mqtd);
         edit[idx].quantidade = Math.max(1, Number(inp.value || 1));
-        render(); // re-render pra atualizar total
+        render();
       });
     });
 
-    // binds preço
     body.querySelectorAll("input[data-mpreco]").forEach((inp) => {
       inp.addEventListener("blur", () => {
         const idx = Number(inp.dataset.mpreco);
@@ -1184,59 +1242,97 @@ async function abrirModalItensVenda(vendaId) {
       });
     });
 
-    // excluir item
     body.querySelectorAll("button[data-mdel]").forEach((btn) => {
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", () => {
         const idx = Number(btn.dataset.mdel);
-        const item = edit[idx];
-        try {
-          const { error } = await sb.from("venda_itens").delete().eq("id", item.venda_item_id);
-          if (error) throw error;
-          edit.splice(idx, 1);
-          showToast("Item excluído.", "success");
-          if (!edit.length) {
-            body.textContent = "Nenhum item nessa venda.";
-          } else {
-            render();
-          }
-          await reloadHistoricoVendas();
-        } catch (e) {
-          console.error(e);
-          showToast(e.message || "Erro ao excluir item.", "error");
-        }
+        edit.splice(idx, 1);
+        if (!edit.length) body.textContent = "Nenhum item nessa venda.";
+        else render();
       });
     });
   };
 
   render();
 
-  // salvar alterações (update item por item)
   btnSalvar.onclick = async () => {
     try {
-      // atualiza cada item
-      for (const it of edit) {
-        const patch = {
-          quantidade: it.quantidade,
-          preco_unit_aplicado: it.preco_unit, // tabela usa preco_unit_aplicado
-          subtotal: it.quantidade * it.preco_unit,
-        };
-
-        const { error } = await sb
-          .from("venda_itens")
-          .update(patch)
-          .eq("id", it.venda_item_id);
-
-        if (error) throw error;
+      if (!edit.length) {
+        showToast("A venda ficará sem itens. Se quiser, exclua a venda.", "error");
+        return;
       }
 
-      showToast("Itens atualizados.", "success");
+      // valida estoque considerando devolução (original)
+      const newMap = new Map();
+      for (const it of edit) {
+        const vid2 = normId(it.variacao_id);
+        newMap.set(vid2, (newMap.get(vid2) || 0) + Number(it.quantidade || 0));
+      }
+
+      const oldMap = new Map();
+      for (const it of original) {
+        const vid2 = normId(it.variacao_id);
+        oldMap.set(vid2, (oldMap.get(vid2) || 0) + Number(it.quantidade || 0));
+      }
+
+      const ids = Array.from(new Set([...newMap.keys(), ...oldMap.keys()]));
+      const estoqueMap = await loadEstoquePorVariacoes(ids);
+
+      for (const [variacaoId, qtdNova] of newMap.entries()) {
+        const emEstoque = estoqueMap.get(variacaoId) ?? 0;
+        const devolvendo = oldMap.get(variacaoId) ?? 0;
+        const disponivel = emEstoque + devolvendo;
+        if (disponivel < qtdNova) {
+          throw new Error(`Estoque insuficiente p/ editar. Disp=${disponivel} / Tentando=${qtdNova}`);
+        }
+      }
+
+      // delta estoque: devolve original e baixa novo
+      const deltaMap = new Map();
+      for (const [k, v] of oldMap.entries()) deltaMap.set(k, (deltaMap.get(k) || 0) + v);
+      for (const [k, v] of newMap.entries()) deltaMap.set(k, (deltaMap.get(k) || 0) - v);
+
+      // aplica delta primeiro (se falhar, não mexe na venda_itens)
+      await applyEstoqueDeltas(deltaMap);
+
+      // regrava venda_itens (simples e consistente)
+      const { error: delErr } = await sb.from("venda_itens").delete().eq("venda_id", vid);
+      if (delErr) {
+        // rollback estoque
+        const rollback = new Map();
+        for (const [k, v] of deltaMap.entries()) rollback.set(k, -v);
+        await applyEstoqueDeltas(rollback);
+        throw delErr;
+      }
+
+      const insertRows = edit.map((it) => {
+        const qtd = Number(it.quantidade || 0);
+        const preco = Number(it.preco_unit || 0);
+        return {
+          venda_id: vid,
+          variacao_id: normId(it.variacao_id),
+          quantidade: qtd,
+          preco_unit_aplicado: preco,
+          subtotal: Number((qtd * preco).toFixed(2)),
+        };
+      });
+
+      const { error: insErr } = await sb.from("venda_itens").insert(insertRows);
+      if (insErr) {
+        // rollback estoque
+        const rollback = new Map();
+        for (const [k, v] of deltaMap.entries()) rollback.set(k, -v);
+        await applyEstoqueDeltas(rollback);
+        throw insErr;
+      }
+
+      showToast("Itens atualizados (estoque ajustado).", "success");
       await reloadHistoricoVendas();
 
-      // se você estiver com a venda aberta na esquerda, recarrega os itens no form também
-      if (state.editVendaId === vendaId) {
-        const itensFresh = await loadVendaItens(vendaId);
+      // se a venda estiver aberta na esquerda, sincroniza
+      if (state.editVendaId === vid) {
+        const itensFresh = await loadVendaItens(vid);
         state.itens = itensFresh.map((i) => ({
-          variacao_id: i.variacao_id,
+          variacao_id: normId(i.variacao_id),
           produto_nome: i.produto,
           produto_codigo: i.codigo_produto,
           cor: i.cor,
@@ -1255,16 +1351,13 @@ async function abrirModalItensVenda(vendaId) {
   };
 }
 
-// deixa acessível no HTML, se você quiser chamar direto
 window.abrirModalItensVenda = abrirModalItensVenda;
-
 
 /* =========================
    EXPORT
 ========================= */
 export async function renderVendas() {
   try {
-    // libera bind de novo (DOM troca)
     window.__vendasBound = false;
 
     const html = renderVendasLayout();
