@@ -755,14 +755,14 @@ async function editarVenda(vendaId) {
     document.getElementById("vObs").value = venda.observacoes || "";
 
     state.itens = (itens || []).map((i) => ({
-      variacao_id: i.variacao_id,
-      produto_nome: i.produto,
-      produto_codigo: i.codigo_produto,
-      cor: i.cor,
-      tamanho: i.tamanho,
-      qtd: Number(i.quantidade || 1),
-      preco_unit: Number(i.preco_unit || 0),
-    }));
+  variacao_id: i.variacao_id,
+  produto_nome: i.produto,
+  produto_codigo: i.codigo_produto,
+  cor: i.cor,
+  tamanho: i.tamanho,
+  qtd: Number(i.quantidade || 1),
+  preco_unit: Number(i.preco_unit || 0),
+}));
 
     renderItensVenda();
     showToast("Venda carregada para edição.", "success");
