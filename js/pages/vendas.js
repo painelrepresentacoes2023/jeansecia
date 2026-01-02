@@ -40,6 +40,14 @@ function fmtDateTimeBR(iso) {
   return d.toLocaleString("pt-BR");
 }
 
+function isoFromDatetimeLocal(value) {
+  // value: "YYYY-MM-DDTHH:mm"
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
+}
+
 /* =========================
    STATE
 ========================= */
@@ -58,7 +66,7 @@ window.__vendasState = state;
    LOADERS
 ========================= */
 async function loadFormasEnum() {
-  // Seu banco tem enum: forma_pagamento
+  // enum: forma_pagamento
   const { data, error } = await sb.rpc("enum_values", { enum_type: "forma_pagamento" });
   if (error) throw error;
   return (data || []).map((x) => x.value);
@@ -68,7 +76,7 @@ async function loadFormasEnum() {
 async function loadProdutosDoEstoque() {
   const { data, error } = await sb
     .from("vw_estoque_detalhado")
-    .select("produto_id, produto, codigo_produto, categoria, quantidade")
+    .select("produto_id, produto, codigo_produto, categoria, quantidade, produto_ativo, variacao_ativa")
     .gt("quantidade", 0)
     .eq("produto_ativo", true)
     .eq("variacao_ativa", true)
@@ -299,7 +307,7 @@ function renderVendasLayout() {
 
       <div class="card">
         <div class="card-title">Histórico de Vendas</div>
-        <div class="card-sub">Filtre, veja itens e edite vendas quando precisar.</div>
+        <div class="card-sub">Filtre, veja itens, edite e exclua vendas quando precisar.</div>
 
         <div class="grid" style="grid-template-columns: 1fr; gap:10px; margin-top:10px;">
           <div class="field">
@@ -319,7 +327,7 @@ function renderVendasLayout() {
                 <th>Cliente</th>
                 <th>Produtos</th>
                 <th>Total</th>
-                <th style="width:160px;">Ações</th>
+                <th style="width:220px;">Ações</th>
               </tr>
             </thead>
             <tbody id="hVendaTbody">
@@ -348,12 +356,17 @@ function showProdList(items) {
   }
 
   box.style.display = "block";
-  box.innerHTML = items.slice(0, 12).map((p) => `
+  box.innerHTML = items
+    .slice(0, 12)
+    .map(
+      (p) => `
     <div class="dropdown-item" data-id="${p.id}">
       <div style="font-weight:700;">${escapeHtml(p.nome)}</div>
       <div class="small">${escapeHtml(p.codigo || "")} • ${escapeHtml(p.categoria_nome || "-")}</div>
     </div>
-  `).join("");
+  `
+    )
+    .join("");
 
   box.querySelectorAll(".dropdown-item").forEach((el) => {
     el.addEventListener("click", async () => {
@@ -383,8 +396,7 @@ async function selectProduto(p) {
   const cores = await loadCoresDoProduto(p.id);
   const corSel = document.getElementById("vCor");
   corSel.innerHTML =
-    `<option value="">Selecione</option>` +
-    cores.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+    `<option value="">Selecione</option>` + cores.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
 
   // limpa tamanhos
   document.getElementById("vTam").innerHTML = `<option value="">Selecione a cor</option>`;
@@ -403,9 +415,12 @@ async function onCorChange() {
   const vars = await loadTamanhosDaVariacao(selectedProduto.id, cor);
   tamSel.innerHTML =
     `<option value="">Selecione</option>` +
-    vars.map((v) =>
-      `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (estoque: ${Number(v.quantidade || 0)})</option>`
-    ).join("");
+    vars
+      .map(
+        (v) =>
+          `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (estoque: ${Number(v.quantidade || 0)})</option>`
+      )
+      .join("");
 }
 
 function clearVendaItemFields(keepProduto = true) {
@@ -436,7 +451,7 @@ function clearVendaItemFields(keepProduto = true) {
    ITENS
 ========================= */
 function calcResumoVenda() {
-  const subtotal = state.itens.reduce((s, it) => s + (Number(it.qtd || 0) * Number(it.preco_unit || 0)), 0);
+  const subtotal = state.itens.reduce((s, it) => s + Number(it.qtd || 0) * Number(it.preco_unit || 0), 0);
   const desconto = parseNumberBR(document.getElementById("vDesconto").value);
   const total = Math.max(subtotal - desconto, 0);
   return { subtotal, desconto, total };
@@ -459,10 +474,11 @@ function renderItensVenda() {
     return;
   }
 
-  tbody.innerHTML = state.itens.map((it, idx) => {
-    const total = Number(it.qtd || 0) * Number(it.preco_unit || 0);
+  tbody.innerHTML = state.itens
+    .map((it, idx) => {
+      const total = Number(it.qtd || 0) * Number(it.preco_unit || 0);
 
-    return `
+      return `
       <tr>
         <td>${escapeHtml(it.produto_nome)} <span class="small">(${escapeHtml(it.produto_codigo || "")})</span></td>
         <td>${escapeHtml(it.cor)}</td>
@@ -485,7 +501,8 @@ function renderItensVenda() {
         </td>
       </tr>
     `;
-  }).join("");
+    })
+    .join("");
 
   // QTD
   tbody.querySelectorAll("input[data-qtd]").forEach((inp) => {
@@ -529,18 +546,11 @@ async function salvarVendaRPC(payload, vendaId = null) {
   if (vendaId) {
     const { error } = await sb.rpc("atualizar_venda", { payload: { ...payload, venda_id: vendaId } });
     if (error) throw error;
-
-    // aqui você atualiza itens (ex: deletar e reinserir, ou upsert)
-    await salvarItensVenda(vendaId);
-
-    showToast("Venda atualizada com sucesso.", "success");
+    return vendaId;
   } else {
     const { data: newId, error } = await sb.rpc("registrar_venda", { payload });
     if (error) throw error;
-
-    await salvarItensVenda(newId);
-
-    showToast("Venda salva com sucesso.", "success");
+    return newId;
   }
 }
 
@@ -552,11 +562,35 @@ async function salvarItensVenda(vendaId) {
     preco_unit_aplicado: Number(it.preco_unit),
   }));
 
-  // ⚠️ TROQUE "venda_itens" pelo nome real da sua tabela de itens
-  const { error } = await sb.from("venda_itens").insert(itens);
-  if (error) throw error;
+  // sempre regrava (simples e confiável)
+  const { error: delErr } = await sb.from("venda_itens").delete().eq("venda_id", vendaId);
+  if (delErr) throw delErr;
+
+  if (itens.length > 0) {
+    const { error: insErr } = await sb.from("venda_itens").insert(itens);
+    if (insErr) throw insErr;
+  }
 }
 
+async function excluirVenda(vendaId) {
+  try {
+    showToast("Excluindo venda...", "info");
+
+    const { error: e1 } = await sb.from("venda_itens").delete().eq("venda_id", vendaId);
+    if (e1) throw e1;
+
+    const { error: e2 } = await sb.from("vendas").delete().eq("id", vendaId);
+    if (e2) throw e2;
+
+    if (state.editVendaId === vendaId) cancelarEdicaoVenda();
+
+    await reloadHistoricoVendas();
+    showToast("Venda excluída.", "success");
+  } catch (e) {
+    console.error(e);
+    showToast(e?.message || "Erro ao excluir venda.", "error");
+  }
+}
 
 /* =========================
    HISTÓRICO
@@ -570,12 +604,7 @@ function renderHistoricoVendasTable(filterText = "") {
 
   if (f) {
     rows = rows.filter((r) => {
-      const s = [
-        r.cliente_nome,
-        r.cliente_telefone,
-        r.forma,
-        r.produtos_resumo,
-      ].join(" ").toLowerCase();
+      const s = [r.cliente_nome, r.cliente_telefone, r.forma, r.produtos_resumo].join(" ").toLowerCase();
       return s.includes(f);
     });
   }
@@ -587,18 +616,25 @@ function renderHistoricoVendasTable(filterText = "") {
     return;
   }
 
-  tbody.innerHTML = rows.map((r) => `
+  tbody.innerHTML = rows
+    .map(
+      (r) => `
     <tr>
       <td>${fmtDateTimeBR(r.data)}</td>
       <td>${escapeHtml(r.cliente_nome || "-")}</td>
-      <td title="${escapeHtml(r.produtos_resumo || "-")}">${escapeHtml((r.produtos_resumo || "-").slice(0, 28))}${(r.produtos_resumo || "").length > 28 ? "..." : ""}</td>
+      <td title="${escapeHtml(r.produtos_resumo || "-")}">${escapeHtml((r.produtos_resumo || "-").slice(0, 28))}${
+        (r.produtos_resumo || "").length > 28 ? "..." : ""
+      }</td>
       <td>${money(r.total || 0)}</td>
       <td style="display:flex; gap:8px; flex-wrap:wrap;">
         <button class="btn" data-ver="${r.venda_id}">Ver itens</button>
         <button class="btn primary" data-editar="${r.venda_id}">Editar</button>
+        <button class="btn danger" data-excluir="${r.venda_id}">Excluir</button>
       </td>
     </tr>
-  `).join("");
+  `
+    )
+    .join("");
 
   tbody.querySelectorAll("button[data-ver]").forEach((btn) => {
     btn.addEventListener("click", async () => verItensVenda(btn.dataset.ver));
@@ -606,6 +642,10 @@ function renderHistoricoVendasTable(filterText = "") {
 
   tbody.querySelectorAll("button[data-editar]").forEach((btn) => {
     btn.addEventListener("click", async () => editarVenda(btn.dataset.editar));
+  });
+
+  tbody.querySelectorAll("button[data-excluir]").forEach((btn) => {
+    btn.addEventListener("click", async () => excluirVenda(btn.dataset.excluir));
   });
 }
 
@@ -640,7 +680,9 @@ async function verItensVenda(vendaId) {
               </tr>
             </thead>
             <tbody>
-              ${itens.map((i) => `
+              ${itens
+                .map(
+                  (i) => `
                 <tr>
                   <td>${escapeHtml(i.produto || "-")} <span class="small">(${escapeHtml(i.codigo_produto || "")})</span></td>
                   <td>${escapeHtml(i.cor || "-")}</td>
@@ -649,7 +691,9 @@ async function verItensVenda(vendaId) {
                   <td>${money(i.preco_unit || 0)}</td>
                   <td>${money(Number(i.quantidade || 0) * Number(i.preco_unit || 0))}</td>
                 </tr>
-              `).join("")}
+              `
+                )
+                .join("")}
             </tbody>
           </table>
         </div>
@@ -701,9 +745,7 @@ async function editarVenda(vendaId) {
     setModoEdicaoVenda(true);
 
     const d = new Date(venda.data);
-    const isoLocal = Number.isNaN(d.getTime())
-      ? ""
-      : new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const isoLocal = Number.isNaN(d.getTime()) ? "" : new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
     document.getElementById("vData").value = isoLocal;
     document.getElementById("vForma").value = venda.forma;
@@ -793,9 +835,8 @@ function bindVendas() {
   inp?.addEventListener("input", () => {
     const q = (inp.value || "").trim().toLowerCase();
     if (!q || q.length < 2) return showProdList([]);
-    const items = (state.produtos || []).filter((p) =>
-      (p.nome || "").toLowerCase().includes(q) ||
-      (p.codigo || "").toLowerCase().includes(q)
+    const items = (state.produtos || []).filter(
+      (p) => (p.nome || "").toLowerCase().includes(q) || (p.codigo || "").toLowerCase().includes(q)
     );
     showProdList(items);
   });
@@ -820,7 +861,7 @@ function bindVendas() {
     const cor = document.getElementById("vCor").value;
     const variacaoId = document.getElementById("vTam").value;
     const tamanhoText = document.getElementById("vTam").selectedOptions?.[0]?.textContent || "";
-    const tamanho = String(tamanhoText).split(" (estoque:")[0].trim(); // tira o " (estoque: X)"
+    const tamanho = String(tamanhoText).split(" (estoque:")[0].trim();
     const qtd = Math.max(1, Number(document.getElementById("vQtd").value || 1));
     const preco = parseNumberBR(document.getElementById("vPreco").value);
 
@@ -854,18 +895,17 @@ function bindVendas() {
   });
 
   document.getElementById("btnCancelarVendaEdicao")?.addEventListener("click", cancelarEdicaoVenda);
-
   document.getElementById("vDesconto")?.addEventListener("input", () => updateResumoOnly());
 
-  // salvar venda
+  // salvar venda (AGORA COMPLETO: cabeçalho + itens)
   document.getElementById("btnSalvarVenda")?.addEventListener("click", async () => {
     const msg = document.getElementById("vMsg");
     if (msg) msg.textContent = "";
 
     if (!state.itens.length) return (msg.textContent = "Adicione pelo menos 1 item.");
 
-    const data = document.getElementById("vData").value;
-    if (!data) return (msg.textContent = "Informe a data/hora.");
+    const dataLocal = document.getElementById("vData").value;
+    if (!dataLocal) return (msg.textContent = "Informe a data/hora.");
 
     const forma = document.getElementById("vForma").value;
     if (!forma) return (msg.textContent = "Selecione a forma.");
@@ -892,25 +932,31 @@ function bindVendas() {
       return;
     }
 
-    const { desconto, total } = calcResumoVenda();
+    // resumo (sem variáveis duplicadas)
+    const { subtotal, desconto, total } = calcResumoVenda();
 
+    // payload (compatível com RPC)
     const payload = {
-  forma,
-  cliente_nome: document.getElementById("vCliente").value.trim() || null,
-  cliente_telefone: document.getElementById("vTelefone").value.trim() || null,
-  desconto_valor: Number(desconto.toFixed(2)),
-  subtotal: Number(subtotal.toFixed(2)),  // crie/calcula antes
-  total: Number(total.toFixed(2)),        // crie/calcula antes
-  observacoes: document.getElementById("vObs").value.trim() || null,
-};
-
+      data: isoFromDatetimeLocal(dataLocal), // respeita a data/hora escolhida
+      forma,
+      cliente_nome: document.getElementById("vCliente").value.trim() || null,
+      cliente_telefone: document.getElementById("vTelefone").value.trim() || null,
+      desconto_valor: Number(desconto.toFixed(2)),
+      subtotal: Number(subtotal.toFixed(2)),
+      total: Number(total.toFixed(2)),
+      observacoes: document.getElementById("vObs").value.trim() || null,
+    };
 
     msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
 
     try {
-      await salvarVendaRPC(payload, state.editVendaId);
+      // 1) salva/atualiza cabeçalho e pega o ID
+      const vendaId = await salvarVendaRPC(payload, state.editVendaId);
 
-      // reset
+      // 2) salva itens
+      await salvarItensVenda(vendaId);
+
+      // reset UI
       state.itens = [];
       renderItensVenda();
       clearVendaItemFields(false);
@@ -954,8 +1000,7 @@ function bindVendas() {
 ========================= */
 export async function renderVendas() {
   try {
-    // importante: a cada render, libera bind de novo (porque o DOM troca)
-    // mas o bindVendas tem guarda; então reseta aqui:
+    // libera bind de novo (DOM troca)
     window.__vendasBound = false;
 
     const html = renderVendasLayout();
