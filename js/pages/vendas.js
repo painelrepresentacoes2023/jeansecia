@@ -914,19 +914,38 @@ function bindVendas() {
     // valida estoque client-side
     try {
       const ids = state.itens.map((i) => i.variacao_id);
-      const estoqueMap = await loadEstoquePorVariacoes(ids);
+const estoqueMap = await loadEstoquePorVariacoes(ids);
 
-      const somaPorVar = new Map();
-      for (const it of state.itens) {
-        somaPorVar.set(it.variacao_id, (somaPorVar.get(it.variacao_id) || 0) + Number(it.qtd || 0));
-      }
+// ✅ se estiver editando, soma "de volta" o que já era dessa venda
+const devolucaoMap = new Map();
+if (state.editVendaId) {
+  const antigos = await loadVendaItens(state.editVendaId); // vw_venda_itens_detalhe
+  for (const a of (antigos || [])) {
+    const vid = a.variacao_id;
+    const qtd = Number(a.quantidade || 0);
+    devolucaoMap.set(vid, (devolucaoMap.get(vid) || 0) + qtd);
+  }
+}
 
-      for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
-        const emEstoque = estoqueMap.get(variacaoId) ?? 0;
-        if (emEstoque < qtdVendendo) {
-          throw new Error(`Estoque insuficiente. Em estoque=${emEstoque} / Tentando vender=${qtdVendendo}`);
-        }
-      }
+const somaPorVar = new Map();
+for (const it of state.itens) {
+  somaPorVar.set(it.variacao_id, (somaPorVar.get(it.variacao_id) || 0) + Number(it.qtd || 0));
+}
+
+for (const [variacaoId, qtdVendendo] of somaPorVar.entries()) {
+  const emEstoque = estoqueMap.get(variacaoId) ?? 0;
+  const devolvendo = devolucaoMap.get(variacaoId) ?? 0;
+
+  // estoque "real" para validação durante edição
+  const disponivel = emEstoque + devolvendo;
+
+  if (disponivel < qtdVendendo) {
+    throw new Error(
+      `Estoque insuficiente. Disponível=${disponivel} (estoque=${emEstoque} + devolução=${devolvendo}) / Tentando=${qtdVendendo}`
+    );
+  }
+}
+
     } catch (e) {
       console.error(e);
       msg.textContent = e?.message || "Estoque insuficiente.";
