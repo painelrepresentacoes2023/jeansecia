@@ -637,7 +637,8 @@ function renderHistoricoVendasTable(filterText = "") {
     .join("");
 
   tbody.querySelectorAll("button[data-ver]").forEach((btn) => {
-    btn.addEventListener("click", async () => verItensVenda(btn.dataset.ver));
+    btn.addEventListener("click", async () => abrirModalItensVenda(btn.dataset.ver));
+
   });
 
   tbody.querySelectorAll("button[data-editar]").forEach((btn) => {
@@ -994,6 +995,250 @@ function bindVendas() {
     });
   }
 }
+
+/* =========================
+   MODAL ITENS (EDITAR VENDA)
+========================= */
+
+// cria modal uma vez
+function ensureModal() {
+  if (document.getElementById("modalVendaItens")) return;
+
+  const div = document.createElement("div");
+  div.id = "modalVendaItens";
+  div.style.cssText = `
+    position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    display:none; align-items:center; justify-content:center;
+    padding: 16px; z-index: 9999;
+  `;
+
+  div.innerHTML = `
+    <div style="width:min(980px, 98vw); background:#0f172a; border:1px solid rgba(255,255,255,.12);
+                border-radius:16px; padding:16px; box-shadow:0 20px 60px rgba(0,0,0,.5);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <div>
+          <div style="font-weight:800; font-size:16px;">Itens da venda</div>
+          <div class="small" id="modalVendaItensInfo" style="margin-top:2px;">—</div>
+        </div>
+        <button class="btn" id="btnFecharModalVendaItens">Fechar</button>
+      </div>
+
+      <div class="hr" style="margin:12px 0;"></div>
+
+      <div id="modalVendaItensBody" class="small">Carregando...</div>
+
+      <div class="hr" style="margin:12px 0;"></div>
+
+      <div style="display:flex; justify-content:flex-end; gap:10px; flex-wrap:wrap;">
+        <button class="btn primary" id="btnSalvarModalVendaItens">Salvar alterações</button>
+      </div>
+    </div>
+  `;
+
+  div.addEventListener("click", (e) => {
+    if (e.target === div) closeModalItens();
+  });
+
+  document.body.appendChild(div);
+
+  document.getElementById("btnFecharModalVendaItens").addEventListener("click", closeModalItens);
+}
+
+function openModalItens() {
+  ensureModal();
+  document.getElementById("modalVendaItens").style.display = "flex";
+}
+
+function closeModalItens() {
+  const m = document.getElementById("modalVendaItens");
+  if (m) m.style.display = "none";
+}
+
+/**
+ * Abre modal de itens da venda e permite editar cada item (qtd e preço agora)
+ * Depois a gente habilita trocar variação (cor/tamanho) se você quiser.
+ */
+async function abrirModalItensVenda(vendaId) {
+  openModalItens();
+
+  const info = document.getElementById("modalVendaItensInfo");
+  const body = document.getElementById("modalVendaItensBody");
+  const btnSalvar = document.getElementById("btnSalvarModalVendaItens");
+
+  info.textContent = `Venda: ${vendaId}`;
+  body.textContent = "Carregando itens...";
+
+  // carrega itens
+  let itens = [];
+  try {
+    itens = await loadVendaItens(vendaId); // usa sua função existente
+  } catch (e) {
+    console.error(e);
+    body.textContent = "Erro ao carregar itens.";
+    return;
+  }
+
+  if (!itens.length) {
+    body.textContent = "Nenhum item nessa venda.";
+    return;
+  }
+
+  // snapshot editável local
+  const edit = itens.map((i) => ({
+    venda_item_id: i.venda_item_id,
+    variacao_id: i.variacao_id,
+    produto: i.produto,
+    codigo_produto: i.codigo_produto,
+    cor: i.cor,
+    tamanho: i.tamanho,
+    quantidade: Number(i.quantidade || 1),
+    preco_unit: Number(i.preco_unit || 0),
+  }));
+
+  // render
+  const render = () => {
+    body.innerHTML = `
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Produto</th>
+              <th>Cor</th>
+              <th>Tam</th>
+              <th style="width:110px;">Qtd</th>
+              <th style="width:140px;">Preço</th>
+              <th>Total</th>
+              <th style="width:140px;">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${edit.map((it, idx) => {
+              const total = it.quantidade * it.preco_unit;
+              return `
+                <tr>
+                  <td>${escapeHtml(it.produto)} <span class="small">(${escapeHtml(it.codigo_produto || "")})</span></td>
+                  <td>${escapeHtml(it.cor || "-")}</td>
+                  <td>${escapeHtml(it.tamanho || "-")}</td>
+
+                  <td>
+                    <input class="input" data-mqtd="${idx}" type="number" min="1" step="1"
+                      value="${it.quantidade}" style="width:90px; padding:8px;" />
+                  </td>
+
+                  <td>
+                    <input class="input" data-mpreco="${idx}" type="text"
+                      value="${String(it.preco_unit).replace(".", ",")}" style="width:120px; padding:8px;" />
+                  </td>
+
+                  <td>${money(total)}</td>
+
+                  <td style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <button class="btn danger" data-mdel="${idx}">Excluir item</button>
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="small" style="margin-top:10px;">
+        Dica: você pode ajustar quantidade e preço. Depois clique em <b>Salvar alterações</b>.
+      </div>
+    `;
+
+    // binds qtd
+    body.querySelectorAll("input[data-mqtd]").forEach((inp) => {
+      inp.addEventListener("input", () => {
+        const idx = Number(inp.dataset.mqtd);
+        edit[idx].quantidade = Math.max(1, Number(inp.value || 1));
+        render(); // re-render pra atualizar total
+      });
+    });
+
+    // binds preço
+    body.querySelectorAll("input[data-mpreco]").forEach((inp) => {
+      inp.addEventListener("blur", () => {
+        const idx = Number(inp.dataset.mpreco);
+        const v = parseNumberBR(inp.value);
+        edit[idx].preco_unit = Math.max(0, Number(v.toFixed(2)));
+        render();
+      });
+    });
+
+    // excluir item
+    body.querySelectorAll("button[data-mdel]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const idx = Number(btn.dataset.mdel);
+        const item = edit[idx];
+        try {
+          const { error } = await sb.from("venda_itens").delete().eq("id", item.venda_item_id);
+          if (error) throw error;
+          edit.splice(idx, 1);
+          showToast("Item excluído.", "success");
+          if (!edit.length) {
+            body.textContent = "Nenhum item nessa venda.";
+          } else {
+            render();
+          }
+          await reloadHistoricoVendas();
+        } catch (e) {
+          console.error(e);
+          showToast(e.message || "Erro ao excluir item.", "error");
+        }
+      });
+    });
+  };
+
+  render();
+
+  // salvar alterações (update item por item)
+  btnSalvar.onclick = async () => {
+    try {
+      // atualiza cada item
+      for (const it of edit) {
+        const patch = {
+          quantidade: it.quantidade,
+          preco_unit_aplicado: it.preco_unit, // tabela usa preco_unit_aplicado
+          subtotal: it.quantidade * it.preco_unit,
+        };
+
+        const { error } = await sb
+          .from("venda_itens")
+          .update(patch)
+          .eq("id", it.venda_item_id);
+
+        if (error) throw error;
+      }
+
+      showToast("Itens atualizados.", "success");
+      await reloadHistoricoVendas();
+
+      // se você estiver com a venda aberta na esquerda, recarrega os itens no form também
+      if (state.editVendaId === vendaId) {
+        const itensFresh = await loadVendaItens(vendaId);
+        state.itens = itensFresh.map((i) => ({
+          variacao_id: i.variacao_id,
+          produto_nome: i.produto,
+          produto_codigo: i.codigo_produto,
+          cor: i.cor,
+          tamanho: i.tamanho,
+          qtd: Number(i.quantidade || 1),
+          preco_unit: Number(i.preco_unit || 0),
+        }));
+        renderItensVenda();
+      }
+
+      closeModalItens();
+    } catch (e) {
+      console.error(e);
+      showToast(e.message || "Erro ao salvar alterações.", "error");
+    }
+  };
+}
+
+// deixa acessível no HTML, se você quiser chamar direto
+window.abrirModalItensVenda = abrirModalItensVenda;
+
 
 /* =========================
    EXPORT
