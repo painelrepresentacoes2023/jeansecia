@@ -529,13 +529,34 @@ async function salvarVendaRPC(payload, vendaId = null) {
   if (vendaId) {
     const { error } = await sb.rpc("atualizar_venda", { payload: { ...payload, venda_id: vendaId } });
     if (error) throw error;
+
+    // aqui você atualiza itens (ex: deletar e reinserir, ou upsert)
+    await salvarItensVenda(vendaId);
+
     showToast("Venda atualizada com sucesso.", "success");
   } else {
-    const { error } = await sb.rpc("registrar_venda", { payload });
+    const { data: newId, error } = await sb.rpc("registrar_venda", { payload });
     if (error) throw error;
+
+    await salvarItensVenda(newId);
+
     showToast("Venda salva com sucesso.", "success");
   }
 }
+
+async function salvarItensVenda(vendaId) {
+  const itens = state.itens.map((it) => ({
+    venda_id: vendaId,
+    variacao_id: it.variacao_id,
+    quantidade: Number(it.qtd),
+    preco_unit_aplicado: Number(it.preco_unit),
+  }));
+
+  // ⚠️ TROQUE "venda_itens" pelo nome real da sua tabela de itens
+  const { error } = await sb.from("venda_itens").insert(itens);
+  if (error) throw error;
+}
+
 
 /* =========================
    HISTÓRICO
@@ -874,18 +895,15 @@ function bindVendas() {
     const { desconto, total } = calcResumoVenda();
 
     const payload = {
-      data: new Date(data).toISOString(),
-      forma,
-      cliente_nome: document.getElementById("vCliente").value.trim() || null,
-      cliente_telefone: document.getElementById("vTelefone").value.trim() || null,
-      desconto_valor: Number(desconto.toFixed(2)),
-      observacoes: document.getElementById("vObs").value.trim() || null,
-      itens: state.itens.map((it) => ({
-        variacao_id: it.variacao_id,
-        quantidade: Number(it.qtd),
-        preco_unit_aplicado: Number(it.preco_unit),
-      })),
-    };
+  forma,
+  cliente_nome: document.getElementById("vCliente").value.trim() || null,
+  cliente_telefone: document.getElementById("vTelefone").value.trim() || null,
+  desconto_valor: Number(desconto.toFixed(2)),
+  subtotal: Number(subtotal.toFixed(2)),  // crie/calcula antes
+  total: Number(total.toFixed(2)),        // crie/calcula antes
+  observacoes: document.getElementById("vObs").value.trim() || null,
+};
+
 
     msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
 
