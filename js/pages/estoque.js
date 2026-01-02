@@ -273,3 +273,9 @@ function initEstoqueEvents() {
   // Carrega inicial (sem filtros)
   applyFilters().catch(console.error);
 }
+
+
+window.addEventListener("forceRefreshEstoque", async () => {
+  console.log("🔄 Recarregando estoque...");
+  await loadEstoque();
+});
