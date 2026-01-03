@@ -22,6 +22,9 @@ function clamp0(n) {
   return x < 0 ? 0 : x;
 }
 
+/**
+ * Corrige bug de “volta 1 dia” em DATE YYYY-MM-DD
+ */
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const s = String(iso).slice(0, 10);
@@ -61,6 +64,54 @@ async function fetchVendasHoje() {
 }
 
 /* =========================
+   ITENS DA VENDA (produtos)
+   - tenta tabelas comuns
+========================= */
+async function fetchItensVendaTexto(vendaId) {
+  if (!vendaId) return "";
+
+  const tables = ["vendas_itens", "venda_itens", "itens_venda"];
+
+  for (const t of tables) {
+    try {
+      const { data, error } = await sb
+        .from(t)
+        .select("*")
+        .eq("venda_id", vendaId);
+
+      if (error) continue;
+
+      const itens = data || [];
+      if (!itens.length) return "";
+
+      // monta texto “produto cor tam xqtd”
+      const lines = itens.map((it) => {
+        const nome =
+          it.descricao ||
+          it.produto_nome ||
+          it.produto ||
+          it.nome_produto ||
+          it.nome ||
+          "-";
+
+        const cor = it.cor || it.color || "";
+        const tam = it.tamanho || it.tam || it.size || "";
+        const qtd = Number(it.qtd ?? it.quantidade ?? it.quant ?? 1);
+
+        const parts = [nome, cor, tam].filter(Boolean).join(" • ");
+        return `${parts} ${qtd > 1 ? `x${qtd}` : ""}`.trim();
+      });
+
+      return lines.filter(Boolean).join(" | ");
+    } catch {
+      // tenta próxima tabela
+    }
+  }
+
+  return ""; // não achou
+}
+
+/* =========================
    CREDIÁRIO – PRÓXIMA PARCELA
 ========================= */
 async function fetchCrediarioResumo() {
@@ -82,27 +133,30 @@ async function fetchCrediarioResumo() {
     return acc + clamp0(Number(p.valor || 0) - Number(p.valor_pago_acumulado || 0));
   }, 0);
 
-  if (!abertas.length) {
-    return { abertoTotal, prox: null };
-  }
+  if (!abertas.length) return { abertoTotal, prox: null };
 
   const prox = abertas[0];
 
+  // pega cliente
   const { data: venda } = await sb
     .from("vendas")
-    .select("cliente_nome,cliente_telefone")
+    .select("id,cliente_nome,cliente_telefone")
     .eq("id", prox.venda_id)
     .maybeSingle();
+
+  // pega itens/produtos
+  const itensTxt = await fetchItensVendaTexto(prox.venda_id);
 
   return {
     abertoTotal,
     prox: {
+      venda_id: prox.venda_id,
       cliente_nome: venda?.cliente_nome || "",
       cliente_telefone: venda?.cliente_telefone || "",
-      vencimento: prox.vencimento,
+      vencimento: prox.vencimento, // ✅ DATA DA PARCELA
       numero: prox.numero,
-      saldo:
-        Number(prox.valor || 0) - Number(prox.valor_pago_acumulado || 0),
+      saldo: Number(prox.valor || 0) - Number(prox.valor_pago_acumulado || 0),
+      itensTxt,
     },
   };
 }
@@ -187,19 +241,31 @@ async function renderCrediario() {
       return;
     }
 
+    const itens = prox.itensTxt ? escapeHtml(prox.itensTxt) : "";
+
     el.innerHTML = `
       <div style="font-weight:900;">Aberto: ${money(abertoTotal)}</div>
 
       <div class="card" style="margin-top:10px;">
         <div style="font-weight:800;">Próxima parcela</div>
-        <div class="small">
-          ${escapeHtml(prox.cliente_nome)} • ${escapeHtml(prox.cliente_telefone)}
+
+        <div class="small" style="margin-top:6px;">
+          <b>${escapeHtml(prox.cliente_nome || "Cliente")}</b>
+          ${prox.cliente_telefone ? ` • ${escapeHtml(prox.cliente_telefone)}` : ""}
         </div>
-        <div class="small">
-          Venc: <b>${fmtDateBR(prox.vencimento)}</b> • Nº <b>${prox.numero}</b>
+
+        <div class="small" style="margin-top:6px;">
+          Vencimento da parcela: <b>${fmtDateBR(prox.vencimento)}</b>
+          • Parcela: <b>${prox.numero}</b>
         </div>
-        <div class="small">
-          Saldo: <b>${money(prox.saldo)}</b>
+
+        <div class="small" style="margin-top:6px;">
+          Saldo desta parcela: <b>${money(prox.saldo)}</b>
+        </div>
+
+        <div class="small" style="margin-top:10px;">
+          <b>Produtos:</b>
+          ${itens ? itens : "(não encontrado)"}
         </div>
       </div>
 
@@ -207,7 +273,8 @@ async function renderCrediario() {
         Abrir no Crediário
       </button>
     `;
-  } catch {
+  } catch (e) {
+    console.error(e);
     el.textContent = "Erro ao carregar crediário.";
   }
 }
@@ -256,10 +323,7 @@ export async function renderDashboard() {
   const html = renderSkeleton();
 
   setTimeout(async () => {
-    await Promise.allSettled([
-      renderVendasHoje(),
-      renderCrediario(),
-    ]);
+    await Promise.allSettled([renderVendasHoje(), renderCrediario()]);
     bindRelatorio();
   }, 0);
 
