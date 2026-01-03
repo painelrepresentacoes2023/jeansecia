@@ -6,7 +6,7 @@ import { sb } from "../supabase.js";
 function showToast(msg, type = "info") {
   console.log(`[${type}] ${msg}`);
   const el = document.getElementById("vMsg");
-  if (el) el.textContent = msg || "";
+  if (el) el.textContent = msg;
 }
 
 /* =========================
@@ -41,7 +41,6 @@ function fmtDateTimeBR(iso) {
 }
 
 function isoFromDatetimeLocal(value) {
-  // value: "YYYY-MM-DDTHH:mm"
   if (!value) return null;
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return null;
@@ -57,14 +56,14 @@ function normId(v) {
    STATE
 ========================= */
 const state = {
-  produtos: [],            // [{id,nome,codigo,categoria_nome}]
-  produtoCores: new Map(), // produto_id -> [cor]
+  produtos: [],
+  produtoCores: new Map(),
   historico: [],
-  itens: [],               // [{variacao_id, produto_nome, produto_codigo, cor, tamanho, qtd, preco_unit}]
+  itens: [],
   editVendaId: null,
   formas: [],
   isSaving: false,
-  bindCtrl: null,          // AbortController p/ matar listeners duplicados
+  bindCtrl: null,
 };
 
 window.__vendasState = state;
@@ -194,9 +193,7 @@ async function loadEstoquePorVariacoes(variacaoIds = []) {
 }
 
 /* =========================
-   IMPORTANTE (DUPLICAÇÃO DO ESTOQUE)
-   ✅ Trigger do banco (t_venda_itens_estoque) dá baixa/devolve.
-   ✅ Então NÃO ajustamos estoque no JS.
+   IMPORTANTE (estoque via trigger do banco)
 ========================= */
 
 /* =========================
@@ -257,7 +254,7 @@ function renderVendasLayout() {
               <label>Parcelas</label>
               <select class="select" id="vParcelas">
                 ${Array.from({ length: 24 }, (_, i) => i + 1)
-                  .map((n) => `<option value="${n}">${n}x</option>`)
+                  .map(n => `<option value="${n}">${n}x</option>`)
                   .join("")}
               </select>
               <div class="small" id="vParcelaInfo" style="margin-top:6px;"></div>
@@ -267,7 +264,7 @@ function renderVendasLayout() {
               <label>Dia do vencimento</label>
               <select class="select" id="vDiaVenc">
                 ${Array.from({ length: 28 }, (_, i) => i + 1)
-                  .map((n) => `<option value="${n}" ${n === 10 ? "selected" : ""}>Dia ${n}</option>`)
+                  .map(n => `<option value="${n}" ${n === 10 ? "selected" : ""}>Dia ${n}</option>`)
                   .join("")}
               </select>
               <div class="small" style="margin-top:6px;">Padrão: dia 10</div>
@@ -487,9 +484,7 @@ async function onCorChange() {
     vars
       .map(
         (v) =>
-          `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (estoque: ${Number(
-            v.quantidade || 0
-          )})</option>`
+          `<option value="${escapeHtml(v.variacao_id)}">${escapeHtml(v.tamanho)} (estoque: ${Number(v.quantidade || 0)})</option>`
       )
       .join("");
 }
@@ -528,14 +523,40 @@ function calcResumoVenda() {
   return { subtotal, desconto, total };
 }
 
+function isCrediarioForma(forma) {
+  return String(forma || "").toLowerCase().includes("credi");
+}
+
+function updateCrediarioInfo() {
+  const box = document.getElementById("boxCrediario");
+  const info = document.getElementById("vParcelaInfo");
+  const forma = document.getElementById("vForma")?.value || "";
+
+  if (!box || !info) return;
+
+  if (!isCrediarioForma(forma)) {
+    box.style.display = "none";
+    info.textContent = "";
+    return;
+  }
+
+  box.style.display = "block";
+
+  const { total } = calcResumoVenda();
+  const n = Number(document.getElementById("vParcelas")?.value || 1);
+  const parcela = n > 0 ? (Number(total || 0) / n) : 0;
+
+  info.textContent = `Parcela estimada: ${money(parcela)}`;
+}
+
 function updateResumoOnly() {
   const { subtotal, desconto, total } = calcResumoVenda();
   const totalPecas = state.itens.reduce((s, it) => s + Number(it.qtd || 0), 0);
-  const el = document.getElementById("vResumo");
-  if (el) {
-    el.textContent =
-      `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
-  }
+  document.getElementById("vResumo").textContent =
+    `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
+
+  // ✅ importante: se for crediário, atualiza parcela estimada sempre
+  updateCrediarioInfo();
 }
 
 function renderItensVenda() {
@@ -585,7 +606,6 @@ function renderItensVenda() {
       const v = Math.max(1, Number(inp.value || 1));
       state.itens[idx].qtd = v;
       updateResumoOnly();
-      updateCrediarioInfo();
     });
   });
 
@@ -596,7 +616,6 @@ function renderItensVenda() {
       state.itens[idx].preco_unit = Math.max(0, Number(v.toFixed(2)));
       inp.value = String(state.itens[idx].preco_unit).replace(".", ",");
       updateResumoOnly();
-      updateCrediarioInfo();
     });
   });
 
@@ -606,42 +625,11 @@ function renderItensVenda() {
       state.itens.splice(idx, 1);
       renderItensVenda();
       updateResumoOnly();
-      updateCrediarioInfo();
     });
   });
 
   document.getElementById("btnSalvarVenda").disabled = false;
   updateResumoOnly();
-  updateCrediarioInfo();
-}
-
-/* =========================
-   CREDIÁRIO (PASSO 1)
-========================= */
-function isCrediarioForma(forma) {
-  return String(forma || "").toLowerCase().includes("credi");
-}
-
-function updateCrediarioInfo() {
-  const box = document.getElementById("boxCrediario");
-  const info = document.getElementById("vParcelaInfo");
-  const forma = document.getElementById("vForma")?.value || "";
-
-  if (!box || !info) return;
-
-  if (!isCrediarioForma(forma)) {
-    box.style.display = "none";
-    info.textContent = "";
-    return;
-  }
-
-  box.style.display = "block";
-
-  const { total } = calcResumoVenda();
-  const n = Number(document.getElementById("vParcelas")?.value || 1);
-  const parcela = n > 0 ? (Number(total || 0) / n) : 0;
-
-  info.textContent = `Parcela estimada: ${money(parcela)}`;
 }
 
 /* =========================
@@ -674,7 +662,7 @@ async function salvarItensVenda(vendaId) {
     };
   });
 
-  // OBS: isso dispara trigger do banco (estoque ajusta aqui)
+  // dispara trigger do banco (estoque ajusta aqui)
   const { error: delErr } = await sb.from("venda_itens").delete().eq("venda_id", vid);
   if (delErr) throw delErr;
 
@@ -748,7 +736,6 @@ async function reloadHistoricoVendas() {
 
 /* =========================
    EXCLUIR VENDA
-   (trigger do banco devolve estoque no DELETE de venda_itens)
 ========================= */
 async function excluirVenda(vendaId) {
   const vid = normId(vendaId);
@@ -821,13 +808,8 @@ async function editarVenda(vendaId) {
     document.getElementById("vDesconto").value = String(Number(venda.desconto_valor || 0)).replace(".", ",");
     document.getElementById("vObs").value = venda.observacoes || "";
 
-    // Se sua view vw_vendas_resumo já tiver esses campos, tenta preencher:
-    if (document.getElementById("vParcelas") && venda.numero_parcelas != null) {
-      document.getElementById("vParcelas").value = String(Number(venda.numero_parcelas || 1));
-    }
-    if (document.getElementById("vDiaVenc") && venda.dia_vencimento != null) {
-      document.getElementById("vDiaVenc").value = String(Number(venda.dia_vencimento || 10));
-    }
+    renderItensVenda();
+    updateCrediarioInfo();
 
     state.itens = (itens || []).map((i) => ({
       variacao_id: normId(i.variacao_id),
@@ -840,7 +822,6 @@ async function editarVenda(vendaId) {
     }));
 
     renderItensVenda();
-    updateCrediarioInfo();
     showToast("Venda carregada para edição.", "success");
   } catch (e) {
     console.error(e);
@@ -859,12 +840,6 @@ function cancelarEdicaoVenda() {
   document.getElementById("vTelefone").value = "";
   document.getElementById("vDesconto").value = "0,00";
   document.getElementById("vObs").value = "";
-
-  // reset crediário UI
-  if (document.getElementById("vParcelas")) document.getElementById("vParcelas").value = "1";
-  if (document.getElementById("vDiaVenc")) document.getElementById("vDiaVenc").value = "10";
-  updateCrediarioInfo();
-
   showToast("Edição cancelada.", "success");
 }
 
@@ -892,11 +867,6 @@ function iniciarNovaVenda() {
   document.getElementById("vDesconto").value = "0,00";
   document.getElementById("vObs").value = "";
 
-  // defaults crediário
-  if (document.getElementById("vParcelas")) document.getElementById("vParcelas").value = "1";
-  if (document.getElementById("vDiaVenc")) document.getElementById("vDiaVenc").value = "10";
-  updateCrediarioInfo();
-
   showToast("Nova venda iniciada.", "success");
   document.getElementById("vProdSearch")?.focus();
 }
@@ -905,7 +875,6 @@ function iniciarNovaVenda() {
    BIND (SEM DUPLICAR EVENTOS)
 ========================= */
 function bindVendas() {
-  // mata listeners antigos quando a tela é re-renderizada
   if (state.bindCtrl) {
     try { state.bindCtrl.abort(); } catch {}
   }
@@ -914,33 +883,28 @@ function bindVendas() {
 
   setDefaultDateTimeNow();
 
-  // enum formas
   const selForma = document.getElementById("vForma");
   selForma.innerHTML = (state.formas || [])
     .map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)
     .join("");
 
-  // forma -> crediário mostra/esconde
+  // ✅ crediário bindings com signal
   document.getElementById("vForma")?.addEventListener("change", updateCrediarioInfo, { signal });
-
-  // parcelas/dia -> recalcula
   document.getElementById("vParcelas")?.addEventListener("change", updateCrediarioInfo, { signal });
   document.getElementById("vDiaVenc")?.addEventListener("change", updateCrediarioInfo, { signal });
 
-  // desconto -> recalcula total/parcela
   document.getElementById("vDesconto")?.addEventListener("input", () => {
     updateResumoOnly();
-    updateCrediarioInfo();
   }, { signal });
 
-  // filtro histórico
+  updateCrediarioInfo();
+
   document.getElementById("hVendaFiltro")?.addEventListener(
     "input",
     (e) => renderHistoricoVendasTable(e.target.value),
     { signal }
   );
 
-  // autocomplete produto
   const inp = document.getElementById("vProdSearch");
   inp?.addEventListener(
     "input",
@@ -955,7 +919,6 @@ function bindVendas() {
     { signal }
   );
 
-  // fecha dropdown clicando fora
   document.addEventListener(
     "click",
     (e) => {
@@ -966,10 +929,8 @@ function bindVendas() {
     { signal }
   );
 
-  // cor -> tamanhos
   document.getElementById("vCor")?.addEventListener("change", onCorChange, { signal });
 
-  // add item
   document.getElementById("btnAddVendaItem")?.addEventListener(
     "click",
     () => {
@@ -1026,14 +987,13 @@ function bindVendas() {
     { signal }
   );
 
-  // salvar venda (cabeçalho + itens; estoque via TRIGGER)
   document.getElementById("btnSalvarVenda")?.addEventListener(
     "click",
     async () => {
       const msg = document.getElementById("vMsg");
       if (msg) msg.textContent = "";
 
-      if (state.isSaving) return; // trava duplo clique / duplo evento
+      if (state.isSaving) return;
       state.isSaving = true;
 
       const btnSalvar = document.getElementById("btnSalvarVenda");
@@ -1048,45 +1008,27 @@ function bindVendas() {
         const forma = document.getElementById("vForma").value;
         if (!forma) return (msg.textContent = "Selecione a forma.");
 
-        // pega itens antigos (se edição) pra validar estoque corretamente
         let oldItens = [];
         if (state.editVendaId) {
-          try {
-            oldItens = await loadVendaItens(state.editVendaId);
-          } catch (e) {
-            console.error(e);
-            return (msg.textContent = "Erro ao carregar itens antigos da venda.");
-          }
+          oldItens = await loadVendaItens(state.editVendaId);
         }
 
-        // valida estoque (na edição, soma devolução dos antigos)
-        try {
-          const newMap = buildQtyMapFromStateItens();
-          const oldMap = buildQtyMapFromVendaItensRows(oldItens);
+        // valida estoque (edição considera devolução)
+        const newMap = buildQtyMapFromStateItens();
+        const oldMap = buildQtyMapFromVendaItensRows(oldItens);
 
-          const ids = Array.from(new Set([...newMap.keys(), ...oldMap.keys()]));
-          const estoqueMap = await loadEstoquePorVariacoes(ids);
+        const ids = Array.from(new Set([...newMap.keys(), ...oldMap.keys()]));
+        const estoqueMap = await loadEstoquePorVariacoes(ids);
 
-          for (const [variacaoId, qtdNova] of newMap.entries()) {
-            const emEstoque = estoqueMap.get(variacaoId) ?? 0;
-            const devolvendo = oldMap.get(variacaoId) ?? 0;
-            const disponivel = emEstoque + devolvendo;
-
-            if (disponivel < qtdNova) {
-              throw new Error(
-                `Estoque insuficiente. Disp=${disponivel} (estoque=${emEstoque} + devolução=${devolvendo}) / Tentando=${qtdNova}`
-              );
-            }
-          }
-        } catch (e) {
-          console.error(e);
-          msg.textContent = e?.message || "Estoque insuficiente.";
-          return;
+        for (const [variacaoId, qtdNova] of newMap.entries()) {
+          const emEstoque = estoqueMap.get(variacaoId) ?? 0;
+          const devolvendo = oldMap.get(variacaoId) ?? 0;
+          const disponivel = emEstoque + devolvendo;
+          if (disponivel < qtdNova) throw new Error(`Estoque insuficiente. Disp=${disponivel} / Tentando=${qtdNova}`);
         }
 
         const { subtotal, desconto, total } = calcResumoVenda();
 
-        // ✅ PASSO 1: campos crediário no payload (só se for crediário)
         const payload = {
           data: isoFromDatetimeLocal(dataLocal),
           forma,
@@ -1096,25 +1038,13 @@ function bindVendas() {
           subtotal: Number(subtotal.toFixed(2)),
           total: Number(total.toFixed(2)),
           observacoes: document.getElementById("vObs").value.trim() || null,
-
-          numero_parcelas: isCrediarioForma(forma)
-            ? Number(document.getElementById("vParcelas")?.value || 1)
-            : null,
-
-          dia_vencimento: isCrediarioForma(forma)
-            ? Number(document.getElementById("vDiaVenc")?.value || 10)
-            : null,
         };
 
         msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
 
-        // 1) salva/atualiza cabeçalho e pega ID
         const vendaId = await salvarVendaRPC(payload, state.editVendaId);
-
-        // 2) salva itens (DELETE+INSERT) => trigger ajusta estoque certinho (uma vez)
         await salvarItensVenda(vendaId);
 
-        // reset UI
         state.itens = [];
         renderItensVenda();
         clearVendaItemFields(false);
@@ -1128,16 +1058,15 @@ function bindVendas() {
         document.getElementById("vDesconto").value = "0,00";
         document.getElementById("vObs").value = "";
 
-        // reset crediário
-        if (document.getElementById("vParcelas")) document.getElementById("vParcelas").value = "1";
-        if (document.getElementById("vDiaVenc")) document.getElementById("vDiaVenc").value = "10";
-        updateCrediarioInfo();
-
         await reloadHistoricoVendas();
         window.dispatchEvent(new Event("forceRefreshEstoque"));
 
         msg.textContent = `OK ✅ Total: ${money(total)}`;
         setTimeout(() => (msg.textContent = ""), 1200);
+
+        // (o pulo automático pro crediário a gente faz no PASSO 2,
+        // junto com gerar parcelas no banco)
+
       } catch (e) {
         console.error(e);
         msg.textContent = e?.message || "Erro ao salvar venda.";
@@ -1150,7 +1079,6 @@ function bindVendas() {
     { signal }
   );
 
-  // botão topo "+ Nova Venda" (fora/geral) — mantém bound simples
   const btnNovaVendaTop = document.getElementById("btnNovaVenda");
   if (btnNovaVendaTop && !btnNovaVendaTop.__bound) {
     btnNovaVendaTop.__bound = true;
@@ -1164,15 +1092,10 @@ function bindVendas() {
       }
     });
   }
-
-  // estado inicial crediário
-  updateCrediarioInfo();
 }
 
 /* =========================
    MODAL ITENS (EDITAR VENDA)
-   Aqui NÃO mexe estoque no JS.
-   Só regrava venda_itens => trigger resolve.
 ========================= */
 function ensureModal() {
   if (document.getElementById("modalVendaItens")) return;
@@ -1280,9 +1203,10 @@ async function abrirModalItensVenda(vendaId) {
             </tr>
           </thead>
           <tbody>
-            ${edit.map((it, idx) => {
-              const total = it.quantidade * it.preco_unit;
-              return `
+            ${edit
+              .map((it, idx) => {
+                const total = it.quantidade * it.preco_unit;
+                return `
                 <tr>
                   <td>${escapeHtml(it.produto)} <span class="small">(${escapeHtml(it.codigo_produto || "")})</span></td>
                   <td>${escapeHtml(it.cor || "-")}</td>
@@ -1305,12 +1229,10 @@ async function abrirModalItensVenda(vendaId) {
                   </td>
                 </tr>
               `;
-            }).join("")}
+              })
+              .join("")}
           </tbody>
         </table>
-      </div>
-      <div class="small" style="margin-top:10px;">
-        Ajuste quantidade e preço. Depois clique em <b>Salvar alterações</b>.
       </div>
     `;
 
@@ -1350,7 +1272,7 @@ async function abrirModalItensVenda(vendaId) {
         return;
       }
 
-      // valida estoque (considerando devolução dos itens atuais da venda)
+      // valida estoque (considerando devolução)
       const newMap = new Map();
       for (const it of edit) {
         const v = normId(it.variacao_id);
@@ -1370,12 +1292,9 @@ async function abrirModalItensVenda(vendaId) {
         const emEstoque = estoqueMap.get(variacaoId) ?? 0;
         const devolvendo = oldMap.get(variacaoId) ?? 0;
         const disponivel = emEstoque + devolvendo;
-        if (disponivel < qtdNova) {
-          throw new Error(`Estoque insuficiente p/ editar. Disp=${disponivel} / Tentando=${qtdNova}`);
-        }
+        if (disponivel < qtdNova) throw new Error(`Estoque insuficiente p/ editar. Disp=${disponivel} / Tentando=${qtdNova}`);
       }
 
-      // regrava venda_itens (DELETE+INSERT) => trigger ajusta estoque corretamente
       const { error: delErr } = await sb.from("venda_itens").delete().eq("venda_id", vid);
       if (delErr) throw delErr;
 
@@ -1394,25 +1313,9 @@ async function abrirModalItensVenda(vendaId) {
       const { error: insErr } = await sb.from("venda_itens").insert(insertRows);
       if (insErr) throw insErr;
 
-      showToast("Itens atualizados (estoque ajustado).", "success");
+      showToast("Itens atualizados ✅", "success");
       await reloadHistoricoVendas();
       window.dispatchEvent(new Event("forceRefreshEstoque"));
-
-      // se a venda estiver aberta na esquerda, sincroniza
-      if (state.editVendaId === vid) {
-        const itensFresh = await loadVendaItens(vid);
-        state.itens = itensFresh.map((i) => ({
-          variacao_id: normId(i.variacao_id),
-          produto_nome: i.produto,
-          produto_codigo: i.codigo_produto,
-          cor: i.cor,
-          tamanho: i.tamanho,
-          qtd: Number(i.quantidade || 1),
-          preco_unit: Number(i.preco_unit || 0),
-        }));
-        renderItensVenda();
-      }
-
       closeModalItens();
     } catch (e) {
       console.error(e);
