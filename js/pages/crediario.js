@@ -30,21 +30,6 @@ function fmtDateBR(iso) {
   return d.toLocaleDateString("pt-BR");
 }
 
-function toISODateToday() {
-  const today = new Date();
-  const yyyy = today.getFullYear();
-  const mm = String(today.getMonth() + 1).padStart(2, "0");
-  const dd = String(today.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function parseNumberBR(v) {
-  if (v == null) return 0;
-  const s = String(v).trim().replace(/\./g, "").replace(",", ".");
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
-}
-
 function normId(v) {
   if (v == null) return "";
   return String(v).trim();
@@ -61,10 +46,8 @@ function clamp0(n) {
 const state = {
   cred: [],
   parcelas: [],
-  formas: [],
   vendaSelecionada: null,
-  paySel: new Set(), // parcela_id
-  crediFormas: [],   // valores do ENUM que são crediário
+  crediFormas: [], // valores do enum forma_pagamento que são credi*
 };
 
 window.__crediarioState = state;
@@ -78,19 +61,7 @@ async function loadEnumValues(enumType) {
   return (data || []).map((x) => x.value);
 }
 
-async function loadFormasEnum() {
-  // seu enum real é forma_pagamento (segundo seu print)
-  try {
-    return await loadEnumValues("forma_pagamento");
-  } catch (e) {
-    // fallback (não quebra a tela)
-    console.warn("Falhou enum forma_pagamento:", e?.message);
-    return [];
-  }
-}
-
 async function loadCrediFormas() {
-  // pega os valores do enum e filtra os que contêm "credi"
   let vals = [];
   try {
     vals = await loadEnumValues("forma_pagamento");
@@ -100,25 +71,19 @@ async function loadCrediFormas() {
 
   const filtered = (vals || []).filter((v) => String(v).toLowerCase().includes("credi"));
 
-  // fallback duro caso enum_values falhe
-  if (!filtered.length) {
-    return ["crediario", "crediário", "credi"].filter(Boolean);
-  }
+  // fallback duro
+  if (!filtered.length) return ["crediario", "crediário", "credi"];
   return filtered;
 }
 
 /**
  * ✅ Lista SOMENTE vendas do crediário
- * IMPORTANTÍSSIMO: NÃO usa ILIKE no enum (isso causava: operator does not exist: forma_pagamento ~~* unknown)
- * => usa IN com os valores do enum que têm "credi"
+ * ✅ NÃO usa ILIKE no enum (era o erro do print)
+ * ✅ Calcula total_pago / saldo_aberto pelas parcelas
  */
 async function loadCrediario() {
-  // 0) descobre quais valores do enum são "crediário"
-  if (!state.crediFormas?.length) {
-    state.crediFormas = await loadCrediFormas();
-  }
+  if (!state.crediFormas?.length) state.crediFormas = await loadCrediFormas();
 
-  // 1) puxa vendas do crediário
   let q = sb
     .from("vendas")
     .select(
@@ -128,13 +93,8 @@ async function loadCrediario() {
     .order("created_at", { ascending: false })
     .limit(200);
 
-  // se tiver lista de formas credi, usa IN (perfeito p/ enum)
-  if (state.crediFormas?.length) {
-    q = q.in("forma", state.crediFormas);
-  } else {
-    // fallback: tenta eq (não deve acontecer)
-    q = q.eq("forma", "crediario");
-  }
+  if (state.crediFormas?.length) q = q.in("forma", state.crediFormas);
+  else q = q.eq("forma", "crediario");
 
   const { data: vendas, error: e1 } = await q;
   if (e1) throw e1;
@@ -147,7 +107,6 @@ async function loadCrediario() {
 
   if (!v.length) return [];
 
-  // 2) puxa parcelas dessas vendas pra somar pagos
   const ids = v.map((x) => x.venda_id).filter(Boolean);
 
   const { data: parc, error: e2 } = await sb
@@ -157,7 +116,6 @@ async function loadCrediario() {
 
   if (e2) throw e2;
 
-  // 3) agrega por venda_id
   const acc = new Map(); // venda_id -> { total_pago }
   for (const p of parc || []) {
     const vid = normId(p.venda_id);
@@ -172,7 +130,6 @@ async function loadCrediario() {
     acc.set(vid, cur);
   }
 
-  // 4) monta resumo final
   return v.map((row) => {
     const total = Number(row.total || 0);
     const total_pago = Number(acc.get(row.venda_id)?.total_pago || 0);
@@ -205,9 +162,24 @@ async function loadParcelas(vendaId) {
   }));
 }
 
-// mantém sua rpc atual (payload jsonb)
-async function registrarPagamentoRPC(payload) {
-  const { error } = await sb.rpc("registrar_pagamento", { payload });
+/* =========================
+   PARCELA: marcar como paga (sem RPC)
+========================= */
+function isPaga(p) {
+  return String(p?.status || "").toLowerCase().includes("pag");
+}
+
+async function marcarParcelaComoPaga(parcela) {
+  const pid = normId(parcela?.parcela_id || parcela?.id);
+  if (!pid) throw new Error("Parcela inválida.");
+
+  const valor = Number(parcela?.valor || 0);
+  if (!Number.isFinite(valor) || valor <= 0) throw new Error("Valor da parcela inválido.");
+
+  // tenta "paga" (conforme seu pedido), se o enum for diferente o Supabase vai devolver erro e você me manda o texto
+  const patch = { status: "paga", valor_pago_acumulado: Number(valor.toFixed(2)) };
+
+  const { error } = await sb.from("parcelas").update(patch).eq("id", pid);
   if (error) throw error;
 }
 
@@ -217,17 +189,7 @@ async function registrarPagamentoRPC(payload) {
 function renderCrediarioLayout() {
   return `
     <style>
-      /* ===== Layout responsivo e sem “corte” ===== */
-      .row2{
-        display:grid;
-        grid-template-columns: 1.05fr 1fr;
-        gap:14px;
-        align-items:start;
-      }
-      @media (max-width: 980px){
-        .row2{ grid-template-columns: 1fr; }
-      }
-
+      /* ===== tabela sem cortar ===== */
       .table-wrap{
         overflow:auto;
         max-width:100%;
@@ -235,63 +197,101 @@ function renderCrediarioLayout() {
       }
       .table{
         width:100%;
-        min-width: 820px; /* impede cortar colunas; vira scroll horizontal */
+        min-width: 900px;
         border-collapse: collapse;
       }
-      @media (max-width: 980px){
-        .table{ min-width: 860px; }
+      #cTbody tr:hover{ filter: brightness(1.08); }
+
+      /* ===== modal ===== */
+      .cModal-backdrop{
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,.55);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 18px;
+        z-index: 9999;
+      }
+      .cModal{
+        width: min(980px, 96vw);
+        max-height: 88vh;
+        overflow: auto;
+        border-radius: 16px;
+        background: rgba(16, 24, 44, .96);
+        border: 1px solid rgba(255,255,255,.08);
+        box-shadow: 0 18px 60px rgba(0,0,0,.45);
+        padding: 16px;
+      }
+      .cModalHeader{
+        display:flex;
+        gap: 10px;
+        align-items:flex-start;
+        justify-content:space-between;
+        margin-bottom: 12px;
+      }
+      .cModalTitle{
+        font-weight: 800;
+        font-size: 1.05rem;
+      }
+      .cModalClose{
+        border-radius: 12px;
       }
 
-      /* ===== Clique/seleção ===== */
-      #cTbody tr[data-open]{ cursor:pointer; }
-      #cTbody tr[data-open]:hover{ filter: brightness(1.08); }
-      #cTbody tr.is-selected{ outline:2px solid rgba(110,168,254,.55); outline-offset:-2px; }
-
-      /* botão */
-      .btn{ cursor:pointer; }
+      /* tabela de parcelas dentro do modal */
+      .pTable{ min-width: 860px; }
+      @media (max-width: 980px){
+        .table{ min-width: 960px; }
+        .pTable{ min-width: 980px; }
+      }
     </style>
 
-    <div class="row2">
-      <div class="card">
-        <div class="card-title">Crediário</div>
-        <div class="card-sub">Vendas no crediário, parcelas e pagamentos.</div>
+    <div class="card">
+      <div class="card-title">Crediário</div>
+      <div class="card-sub">Vendas no crediário, parcelas e pagamentos.</div>
 
-        <div class="grid" style="grid-template-columns: 1fr; gap:10px; margin-top:12px;">
-          <div class="field">
-            <label>Buscar</label>
-            <input class="input" id="fCred" placeholder="cliente, telefone..." />
-          </div>
-        </div>
-
-        <div class="small" id="cInfo" style="margin-top:10px;">Carregando...</div>
-
-        <div class="table-wrap" style="margin-top:10px;">
-          <table class="table">
-            <thead>
-              <tr>
-                <th style="min-width:110px;">Data</th>
-                <th style="min-width:220px;">Cliente</th>
-                <th style="min-width:120px;">Total</th>
-                <th style="min-width:120px;">Pago</th>
-                <th style="min-width:120px;">Aberto</th>
-                <th style="min-width:130px;">Status</th>
-                <th style="min-width:170px;">Ação</th>
-              </tr>
-            </thead>
-            <tbody id="cTbody">
-              <tr><td colspan="7" class="small">Carregando...</td></tr>
-            </tbody>
-          </table>
+      <div class="grid" style="grid-template-columns: 1fr; gap:10px; margin-top:12px;">
+        <div class="field">
+          <label>Buscar</label>
+          <input class="input" id="fCred" placeholder="cliente, telefone..." />
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-title">Detalhes</div>
-        <div class="card-sub">Clique em <b>Ver detalhes</b> em uma venda para ver parcelas.</div>
+      <div class="small" id="cMsg" style="margin-top:10px;"></div>
+      <div class="small" id="cInfo" style="margin-top:10px;">Carregando...</div>
 
-        <div class="small" id="cMsg" style="margin-top:10px;"></div>
+      <div class="table-wrap" style="margin-top:10px;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="min-width:110px;">Data</th>
+              <th style="min-width:260px;">Cliente</th>
+              <th style="min-width:120px;">Total</th>
+              <th style="min-width:120px;">Pago</th>
+              <th style="min-width:120px;">Aberto</th>
+              <th style="min-width:120px;">Status</th>
+              <th style="min-width:170px;">Ação</th>
+            </tr>
+          </thead>
+          <tbody id="cTbody">
+            <tr><td colspan="7" class="small">Carregando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
 
-        <div id="detBox" style="margin-top:10px;" class="small">Nenhuma venda selecionada.</div>
+    <!-- MODAL -->
+    <div class="cModal-backdrop" id="cModalBackdrop" aria-hidden="true">
+      <div class="cModal" role="dialog" aria-modal="true" aria-labelledby="cModalTitle">
+        <div class="cModalHeader">
+          <div>
+            <div class="cModalTitle" id="cModalTitle">Detalhes</div>
+            <div class="small" id="cModalSub">—</div>
+          </div>
+          <button class="btn cModalClose" id="cModalClose">Fechar</button>
+        </div>
+
+        <div id="cModalBody" class="small">Carregando...</div>
       </div>
     </div>
   `;
@@ -300,16 +300,6 @@ function renderCrediarioLayout() {
 function isQuitado(vendaRow) {
   const aberto = Number(vendaRow?.saldo_aberto || 0);
   return aberto <= 0.009;
-}
-
-function markSelectedRow(vendaId) {
-  const vid = normId(vendaId);
-  const tbody = document.getElementById("cTbody");
-  if (!tbody) return;
-  tbody.querySelectorAll("tr").forEach((tr) => tr.classList.remove("is-selected"));
-  if (!vid) return;
-  const tr = tbody.querySelector(`tr[data-open="${CSS.escape(vid)}"]`);
-  if (tr) tr.classList.add("is-selected");
 }
 
 function renderTabelaCred(filtro = "") {
@@ -338,7 +328,7 @@ function renderTabelaCred(filtro = "") {
       const status = isQuitado(r) ? "Pago ✅" : "Em aberto";
       const vid = escapeHtml(r.venda_id);
       return `
-        <tr data-open="${vid}">
+        <tr>
           <td>${fmtDateBR(r.data)}</td>
           <td>
             ${escapeHtml(r.cliente_nome || "-")}
@@ -349,79 +339,117 @@ function renderTabelaCred(filtro = "") {
           <td>${money(r.saldo_aberto || 0)}</td>
           <td>${status}</td>
           <td>
-            <button class="btn primary" data-openbtn="${vid}">Ver detalhes</button>
+            <button class="btn primary" data-open="${vid}">Ver detalhes</button>
           </td>
         </tr>
       `;
     })
     .join("");
 
-  // Clique na linha (também abre)
-  tbody.querySelectorAll("tr[data-open]").forEach((tr) => {
-    tr.addEventListener("click", async () => {
-      const vid = tr.getAttribute("data-open");
-      await abrirVenda(vid);
-    });
-  });
-
-  // Clique no botão (não duplica)
-  tbody.querySelectorAll("button[data-openbtn]").forEach((btn) => {
+  tbody.querySelectorAll("button[data-open]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.preventDefault();
-      ev.stopPropagation();
-      await abrirVenda(btn.dataset.openbtn);
+      await abrirModalVenda(btn.dataset.open);
     });
   });
 }
 
-async function abrirVenda(vendaId) {
+/* =========================
+   MODAL
+========================= */
+function modalEls() {
+  return {
+    backdrop: document.getElementById("cModalBackdrop"),
+    close: document.getElementById("cModalClose"),
+    title: document.getElementById("cModalTitle"),
+    sub: document.getElementById("cModalSub"),
+    body: document.getElementById("cModalBody"),
+  };
+}
+
+function openModal() {
+  const { backdrop } = modalEls();
+  if (!backdrop) return;
+  backdrop.style.display = "flex";
+  backdrop.setAttribute("aria-hidden", "false");
+}
+
+function closeModal() {
+  const { backdrop } = modalEls();
+  if (!backdrop) return;
+  backdrop.style.display = "none";
+  backdrop.setAttribute("aria-hidden", "true");
+}
+
+function bindModalOnce() {
+  if (window.__credModalBound) return;
+  window.__credModalBound = true;
+
+  const { backdrop, close } = modalEls();
+  if (close) close.addEventListener("click", closeModal);
+
+  // clica fora fecha
+  if (backdrop) {
+    backdrop.addEventListener("click", (ev) => {
+      if (ev.target === backdrop) closeModal();
+    });
+  }
+
+  // ESC fecha
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closeModal();
+  });
+}
+
+async function abrirModalVenda(vendaId) {
   const vid = normId(vendaId);
   const venda = (state.cred || []).find((v) => normId(v.venda_id) === vid);
   if (!venda) return showToast("Venda não encontrada.", "error");
 
   state.vendaSelecionada = venda;
-  state.paySel = new Set();
 
-  showToast("", "info");
-  markSelectedRow(vid);
+  bindModalOnce();
+  openModal();
+
+  const { title, sub, body } = modalEls();
+  if (title) title.textContent = "Detalhes da venda";
+  if (sub) sub.textContent = "Carregando parcelas...";
+  if (body) body.innerHTML = `<div class="small">Carregando...</div>`;
 
   try {
     state.parcelas = await loadParcelas(vid);
+    renderModalDetalhes();
   } catch (e) {
     console.error(e);
-    state.parcelas = [];
-    showToast(e?.message || "Erro ao carregar parcelas.", "error");
+    if (sub) sub.textContent = "Erro ao carregar.";
+    if (body) body.innerHTML = `<div class="small">${escapeHtml(e?.message || "Erro ao carregar detalhes.")}</div>`;
   }
-
-  renderDetalhes();
 }
 
-function parcelaQuitada(p) {
-  const valor = Number(p.valor || 0);
-  const pagoAc = Number(p.valor_pago_acumulado || 0);
-  const saldo = Number((valor - pagoAc).toFixed(2));
-  return saldo <= 0.009;
-}
-
-function renderDetalhes() {
+function renderModalDetalhes() {
   const venda = state.vendaSelecionada;
-  const box = document.getElementById("detBox");
+  const parcelas = state.parcelas || [];
+  const { sub, body } = modalEls();
 
   if (!venda) {
-    box.innerHTML = "Nenhuma venda selecionada.";
+    if (sub) sub.textContent = "Nenhuma venda.";
+    if (body) body.innerHTML = `<div class="small">Nenhuma venda selecionada.</div>`;
     return;
   }
 
-  const parcelas = state.parcelas || [];
   const total = Number(venda.total || 0);
   const pago = Number(venda.total_pago || 0);
   const aberto = Number(venda.saldo_aberto || 0);
   const endereco = venda.cliente_endereco || "";
   const statusVenda = isQuitado(venda) ? "Pago ✅" : "Em aberto";
 
-  box.innerHTML = `
+  if (sub) sub.textContent = `${venda.cliente_nome || "Cliente"} • ${venda.cliente_telefone || ""}`;
+
+  if (!body) return;
+
+  body.innerHTML = `
     <div class="card" style="margin-bottom:12px;">
-      <div style="font-weight:800; font-size: 1.05rem;">${escapeHtml(venda.cliente_nome || "Cliente")}</div>
+      <div style="font-weight:800;">${escapeHtml(venda.cliente_nome || "Cliente")}</div>
       <div class="small">${escapeHtml(venda.cliente_telefone || "")}</div>
       ${endereco ? `<div class="small" style="margin-top:4px;">${escapeHtml(endereco)}</div>` : ""}
 
@@ -434,33 +462,25 @@ function renderDetalhes() {
         </div>
         ${venda.observacoes ? `<div style="margin-top:6px;">Obs: ${escapeHtml(venda.observacoes)}</div>` : ""}
       </div>
-
-      <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button class="btn" id="btnFecharVenda">Fechar</button>
-      </div>
     </div>
 
     <div class="card">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
         <div style="font-weight:800;">Parcelas</div>
-        <button class="btn primary" id="btnPagarSelecionadas">Marcar selecionadas como pagas</button>
-      </div>
-
-      <div class="small" style="margin-top:6px;">
-        Marque a parcela do mês que foi paga e clique em <b>Marcar selecionadas como pagas</b>.
+        <div class="small">Clique em <b>Marcar como paga</b> quando o cliente pagar.</div>
       </div>
 
       <div class="table-wrap" style="margin-top:10px;">
-        <table class="table" style="min-width: 760px;">
+        <table class="table pTable">
           <thead>
             <tr>
-              <th style="width:70px;">Pagar</th>
-              <th style="width:70px;">Nº</th>
+              <th style="width:80px;">Nº</th>
               <th style="width:140px;">Venc.</th>
               <th style="width:140px;">Valor</th>
               <th style="width:140px;">Pago</th>
               <th style="width:140px;">Saldo</th>
-              <th style="width:150px;">Status</th>
+              <th style="width:160px;">Status</th>
+              <th style="width:190px;">Ação</th>
             </tr>
           </thead>
           <tbody id="parcTbody">
@@ -468,27 +488,27 @@ function renderDetalhes() {
               parcelas.length
                 ? parcelas
                     .map((p) => {
-                      const parcela_id = normId(p.parcela_id || p.id);
+                      const pid = normId(p.parcela_id || p.id);
                       const valor = Number(p.valor || 0);
                       const pagoAc = Number(p.valor_pago_acumulado || 0);
                       const saldo = Number((valor - pagoAc).toFixed(2));
-                      const quit = saldo <= 0.009;
+                      const paga = isPaga(p) || saldo <= 0.009;
 
                       return `
                         <tr>
-                          <td>
-                            ${
-                              quit
-                                ? `<span class="small">✅</span>`
-                                : `<input type="checkbox" data-pay="${escapeHtml(parcela_id)}" />`
-                            }
-                          </td>
                           <td>${Number(p.numero || 0)}</td>
                           <td>${fmtDateBR(p.vencimento)}</td>
                           <td>${money(valor)}</td>
                           <td>${money(pagoAc)}</td>
                           <td>${money(clamp0(saldo))}</td>
-                          <td>${quit ? "Pago ✅" : escapeHtml(String(p.status || "em_aberto"))}</td>
+                          <td>${paga ? "paga" : escapeHtml(String(p.status || "aberta"))}</td>
+                          <td>
+                            ${
+                              paga
+                                ? `<span class="small">—</span>`
+                                : `<button class="btn primary" data-pay="${escapeHtml(pid)}">Marcar como paga</button>`
+                            }
+                          </td>
                         </tr>
                       `;
                     })
@@ -498,77 +518,45 @@ function renderDetalhes() {
           </tbody>
         </table>
       </div>
+
+      <div class="small" style="margin-top:10px;" id="modalMsg"></div>
     </div>
   `;
 
-  document.getElementById("btnFecharVenda").addEventListener("click", () => {
-    state.vendaSelecionada = null;
-    state.parcelas = [];
-    state.paySel = new Set();
-    box.innerHTML = "Nenhuma venda selecionada.";
-    markSelectedRow("");
-    showToast("", "info");
-  });
+  // bind botões "Marcar como paga"
+  const tbody = body.querySelector("#parcTbody");
+  const modalMsg = body.querySelector("#modalMsg");
 
-  // binds seleção
-  document.querySelectorAll("input[data-pay]").forEach((chk) => {
-    chk.addEventListener("change", () => {
-      const pid = normId(chk.dataset.pay);
-      if (!pid) return;
-      if (chk.checked) state.paySel.add(pid);
-      else state.paySel.delete(pid);
-    });
-  });
+  tbody?.querySelectorAll("button[data-pay]")?.forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const parcelaId = normId(btn.dataset.pay);
+      const parcela = (state.parcelas || []).find((x) => normId(x.parcela_id || x.id) === parcelaId);
+      if (!parcela) return;
 
-  // marcar selecionadas como pagas (paga o SALDO de cada parcela)
-  document.getElementById("btnPagarSelecionadas").addEventListener("click", async () => {
-    const vendaAtual = state.vendaSelecionada;
-    if (!vendaAtual) return;
+      if (modalMsg) modalMsg.textContent = "Salvando...";
 
-    const ids = Array.from(state.paySel.values()).filter(Boolean);
-    if (!ids.length) return showToast("Marque pelo menos 1 parcela.", "error");
+      try {
+        await marcarParcelaComoPaga(parcela);
 
-    // Forma do pagamento: aqui eu uso a própria forma da venda como padrão,
-    // você pode trocar depois se quiser adicionar select.
-    const forma = String(vendaAtual.forma || "crediario");
-    const data_pagamento = toISODateToday();
+        // recarrega tudo pra atualizar totals + parcelas
+        state.cred = await loadCrediario();
+        state.parcelas = await loadParcelas(venda.venda_id);
 
-    const mapParc = new Map((state.parcelas || []).map((p) => [normId(p.parcela_id || p.id), p]));
+        // atualiza vendaSelecionada (pra atualizar total/pago/aberto)
+        state.vendaSelecionada = (state.cred || []).find((v) => normId(v.venda_id) === normId(venda.venda_id)) || venda;
 
-    showToast("Registrando pagamento...", "info");
+        // re-render lista e modal
+        renderTabelaCred(document.getElementById("fCred")?.value || "");
+        renderModalDetalhes();
 
-    try {
-      for (const parcela_id of ids) {
-        const p = mapParc.get(parcela_id);
-        if (!p) continue;
-        if (parcelaQuitada(p)) continue;
-
-        const valor = Number(p.valor || 0);
-        const pagoAc = Number(p.valor_pago_acumulado || 0);
-        const saldo = Number((valor - pagoAc).toFixed(2));
-        if (saldo <= 0.009) continue;
-
-        await registrarPagamentoRPC({
-          venda_id: vendaAtual.venda_id,
-          parcela_id,
-          parcela_numero: Number(p.numero || 0),
-          data_pagamento,
-          valor_pago: Number(saldo.toFixed(2)),
-          forma,
-          observacoes: `Pagamento parcela #${Number(p.numero || 0)}`,
-        });
+        showToast("Parcela marcada como paga ✅", "success");
+      } catch (e) {
+        console.error(e);
+        const msg = e?.message || "Erro ao marcar parcela como paga.";
+        if (modalMsg) modalMsg.textContent = msg;
+        showToast(msg, "error");
       }
-
-      showToast("Parcelas marcadas como pagas ✅", "success");
-
-      // recarrega lista + reabre venda
-      state.cred = await loadCrediario();
-      renderTabelaCred(document.getElementById("fCred")?.value || "");
-      await abrirVenda(vendaAtual.venda_id);
-    } catch (e) {
-      console.error(e);
-      showToast(e?.message || "Erro ao marcar parcelas como pagas.", "error");
-    }
+    });
   });
 }
 
@@ -583,28 +571,22 @@ export async function renderCrediario() {
       try {
         showToast("", "info");
 
-        // carrega formas do enum (pra você usar em outros lugares se quiser)
-        state.formas = await loadFormasEnum();
-
-        // carrega as formas que são crediário (resolve o ERRO do ILIKE no enum)
         state.crediFormas = await loadCrediFormas();
-
-        // lista vendas
         state.cred = await loadCrediario();
 
         renderTabelaCred("");
 
         const f = document.getElementById("fCred");
         if (f) {
-          f.addEventListener("input", (e) => {
-            renderTabelaCred(e.target.value);
-          });
+          f.addEventListener("input", (e) => renderTabelaCred(e.target.value));
         }
+
+        // bind modal
+        bindModalOnce();
       } catch (e) {
         console.error(e);
         showToast(e?.message || "Erro ao iniciar Crediário.", "error");
 
-        // deixa a tabela “vazia” de forma bonita
         const tbody = document.getElementById("cTbody");
         const info = document.getElementById("cInfo");
         if (info) info.textContent = "0 venda(s) no crediário.";
