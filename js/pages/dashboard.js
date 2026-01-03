@@ -17,449 +17,459 @@ function money(n) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+/**
+ * Corrige bug do “volta 1 dia” em DATE (YYYY-MM-DD)
+ */
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const s = String(iso).slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const [y, m, d] = s.split("-").map(Number);
-    return new Date(y, m - 1, d).toLocaleDateString("pt-BR");
+    const dt = new Date(y, m - 1, d);
+    return dt.toLocaleDateString("pt-BR");
   }
   const d2 = new Date(iso);
   if (Number.isNaN(d2.getTime())) return String(iso);
   return d2.toLocaleDateString("pt-BR");
 }
 
-function todayDateOnly() {
-  const d = new Date();
+function normId(v) {
+  if (v == null) return "";
+  return String(v).trim();
+}
+
+function clamp0(n) {
+  const x = Number(n || 0);
+  return x < 0 ? 0 : x;
+}
+
+/**
+ * Intervalo do dia (local) em ISO (pra filtrar timestamp)
+ */
+function getTodayRangeISO() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
+  return { startISO: start.toISOString(), endISO: end.toISOString() };
+}
+
+function toISODateYYYYMMDD(d) {
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function startOfDayISO(d = new Date()) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
-  return x.toISOString();
-}
-function endOfDayISO(d = new Date()) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
-  return x.toISOString();
-}
-
-async function safeQuery(fn) {
-  try {
-    const res = await fn();
-    if (res?.error) throw res.error;
-    return res?.data ?? [];
-  } catch (e) {
-    console.warn(e);
-    return null;
-  }
-}
-
-/* tenta vários selects para descobrir colunas/tabelas sem quebrar */
-async function trySelect(table, selectTries, build) {
-  for (const sel of selectTries) {
-    const data = await safeQuery(() => build(sb.from(table).select(sel)));
-    if (data !== null) return { ok: true, table, used: sel, data };
-  }
-  return { ok: false, table, used: null, data: [] };
-}
-
-/* =========================
-   UI
-========================= */
-function layout() {
-  return `
-    <div class="grid cols-3">
-      <div class="card">
-        <div class="card-title">Vendas Hoje</div>
-        <div class="card-sub">Resumo por data</div>
-        <div class="small" id="vHojeMsg" style="margin-top:10px;">Carregando...</div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Crediário</div>
-        <div class="card-sub">Próxima parcela + resumo</div>
-        <div class="small" id="credMsg" style="margin-top:10px;">Carregando...</div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Estoque Baixo</div>
-        <div class="card-sub">Itens abaixo do mínimo</div>
-        <div class="small" id="estMsg" style="margin-top:10px;">Carregando...</div>
-      </div>
-    </div>
-
-    <div class="grid cols-2" style="margin-top:14px;">
-      <div class="card">
-        <div class="card-title">Relatório por período</div>
-        <div class="card-sub">Filtro de datas</div>
-
-        <div class="grid" style="grid-template-columns: 1fr 1fr auto; gap:10px; margin-top:12px; align-items:end;">
-          <div class="field">
-            <label>Início</label>
-            <input class="input" id="rpIni" type="date" />
-          </div>
-          <div class="field">
-            <label>Fim</label>
-            <input class="input" id="rpFim" type="date" />
-          </div>
-          <button class="btn primary" id="rpBtn">Aplicar</button>
-        </div>
-
-        <div class="small" id="rpOut" style="margin-top:12px;">Selecione um período.</div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Resumo rápido</div>
-        <div class="card-sub">Visão geral</div>
-        <div class="small" style="margin-top:12px; opacity:.85;">
-          • Vendas hoje<br/>
-          • Próxima parcela do crediário<br/>
-          • Produtos abaixo do mínimo
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function setHtml(id, html) {
-  const el = document.getElementById(id);
-  if (el) el.innerHTML = html;
+function parseDateInputToISOStartEnd(startYYYYMMDD, endYYYYMMDD) {
+  // inclui o dia final inteiro
+  const [sy, sm, sd] = startYYYYMMDD.split("-").map(Number);
+  const [ey, em, ed] = endYYYYMMDD.split("-").map(Number);
+  const start = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
+  const end = new Date(ey, em - 1, ed + 1, 0, 0, 0, 0);
+  return { startISO: start.toISOString(), endISO: end.toISOString() };
 }
 
 /* =========================
    LOADERS
 ========================= */
 async function loadVendasHoje() {
-  const start = startOfDayISO(new Date());
-  const end = endOfDayISO(new Date());
+  const { startISO, endISO } = getTodayRangeISO();
+  const { data, error } = await sb
+    .from("vendas")
+    .select("id,total,data,created_at")
+    .gte("data", startISO)
+    .lt("data", endISO);
 
-  // tenta por "data", fallback "created_at"
-  let r = await trySelect(
-    "vendas",
-    ["id,data,total", "id,data,total,forma", "id,created_at,total"],
-    (q) => q.gte("data", start).lte("data", end).limit(2000)
-  );
+  if (error) throw error;
 
-  if (!r.ok) {
-    r = await trySelect(
-      "vendas",
-      ["id,created_at,total", "id,created_at,total,forma"],
-      (q) => q.gte("created_at", start).lte("created_at", end).limit(2000)
-    );
-  }
-
-  return r.ok ? r.data : null;
+  const rows = data || [];
+  const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
+  return { qtd: rows.length, total };
 }
 
-/* enum formas crediário */
-async function loadCrediFormas() {
-  const vals = await safeQuery(() => sb.rpc("enum_values", { enum_type: "forma_pagamento" }));
-  if (vals === null) return ["crediario", "crediário", "credi"];
-  const filtered = (vals || [])
-    .map((x) => x.value)
-    .filter((v) => String(v).toLowerCase().includes("credi"));
-  return filtered.length ? filtered : ["crediario", "crediário", "credi"];
+async function loadVendasPeriodo(startISO, endISO) {
+  const { data, error } = await sb
+    .from("vendas")
+    .select("id,total,data")
+    .gte("data", startISO)
+    .lt("data", endISO);
+
+  if (error) throw error;
+
+  const rows = data || [];
+  const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
+  return { qtd: rows.length, total };
 }
 
-/* resumo crediário + parcela mais próxima */
-async function loadCrediarioResumoComProxima() {
-  const crediFormas = await loadCrediFormas();
+/**
+ * Crediário (dashboard):
+ * - Total em aberto (somando saldo das parcelas abertas)
+ * - Próxima parcela a vencer (a mais próxima em vencimento, ainda aberta)
+ */
+async function loadCrediarioDashboard() {
+  // Pega parcelas em aberto (não pagas)
+  const { data: parc, error: e1 } = await sb
+    .from("parcelas")
+    .select("id,venda_id,numero,vencimento,valor,valor_pago_acumulado,status")
+    .order("vencimento", { ascending: true })
+    .limit(500);
 
-  const vendas = await safeQuery(() =>
-    sb.from("vendas").select("id,forma,total,cliente_nome,cliente_telefone").in("forma", crediFormas).limit(3000)
-  );
+  if (e1) throw e1;
 
-  const vendaIds = (Array.isArray(vendas) ? vendas : []).map((v) => String(v.id)).filter(Boolean);
-  if (!vendaIds.length) {
+  const parcelas = (parc || []).map((p) => {
+    const valor = Number(p.valor || 0);
+    const pago = Number(p.valor_pago_acumulado || 0);
+    const saldo = Number((valor - pago).toFixed(2));
+    const status = String(p.status || "").toLowerCase();
+    const quitada = saldo <= 0.009 || status.includes("pag");
     return {
-      vencidasCount: 0,
-      proximas7Count: 0,
-      totalAberto: 0,
-      proximaParcela: null,
+      ...p,
+      venda_id: normId(p.venda_id),
+      saldo: clamp0(saldo),
+      quitada,
     };
-  }
+  });
 
-  const parcelas = await safeQuery(() =>
-    sb
-      .from("parcelas")
-      .select("id,venda_id,numero,vencimento,valor,valor_pago_acumulado,status")
-      .in("venda_id", vendaIds)
-      .limit(10000)
-  );
+  const abertas = parcelas.filter((p) => !p.quitada);
+  const abertoTotal = abertas.reduce((acc, p) => acc + Number(p.saldo || 0), 0);
 
-  const hoje = todayDateOnly();
-  const limite7 = (() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}`;
-  })();
+  // próxima parcela = a menor vencimento (já está ordenado), dentre as abertas
+  const prox = abertas.length ? abertas[0] : null;
 
-  const list = (Array.isArray(parcelas) ? parcelas : [])
-    .map((p) => {
-      const valor = Number(p.valor || 0);
-      const pago = Number(p.valor_pago_acumulado || 0);
-      const saldo = Number((valor - pago).toFixed(2));
-      const st = String(p.status || "").toLowerCase();
-      const quit = saldo <= 0.009 || st.includes("pag");
-      const venc = String(p.vencimento).slice(0, 10);
-      return { ...p, saldo, quit, venc };
-    })
-    .filter((p) => !p.quit);
+  let vendaInfo = null;
+  if (prox?.venda_id) {
+    // tenta buscar cliente da venda
+    const { data: vData, error: vErr } = await sb
+      .from("vendas")
+      .select("id,cliente_nome,cliente_telefone,forma,total")
+      .eq("id", prox.venda_id)
+      .maybeSingle();
 
-  const vencidas = list.filter((p) => p.venc < hoje);
-  const proximas7 = list.filter((p) => p.venc >= hoje && p.venc <= limite7);
-
-  const totalAberto = list.reduce((s, p) => s + Number(p.saldo || 0), 0);
-
-  // pega a próxima a vencer (>= hoje). se não tiver, pega a mais atrasada (menor vencimento)
-  const proximasOrdenadas = [...list].sort((a, b) => (a.venc > b.venc ? 1 : a.venc < b.venc ? -1 : 0));
-  const prox = proximasOrdenadas.find((p) => p.venc >= hoje) || proximasOrdenadas[0] || null;
-
-  let proximaParcela = null;
-  if (prox) {
-    const venda = (vendas || []).find((v) => String(v.id) === String(prox.venda_id)) || null;
-    proximaParcela = { ...prox, venda };
+    if (!vErr) vendaInfo = vData || null;
   }
 
   return {
-    vencidasCount: vencidas.length,
-    proximas7Count: proximas7.length,
-    totalAberto,
-    proximaParcela,
+    abertoTotal: Number(abertoTotal.toFixed(2)),
+    proxParcela: prox
+      ? {
+          parcela_numero: Number(prox.numero || 0),
+          vencimento: prox.vencimento,
+          saldo: Number((prox.saldo || 0).toFixed(2)),
+          venda_id: prox.venda_id,
+          cliente_nome: vendaInfo?.cliente_nome || "",
+          cliente_telefone: vendaInfo?.cliente_telefone || "",
+        }
+      : null,
   };
 }
 
-/* Estoque baixo: tenta produtos, se falhar tenta estoque */
+/**
+ * Estoque baixo:
+ * tenta primeiro tabela "estoque" com colunas do seu print:
+ * categoria, produto, codigo, cor, tamanho, qtd, minimo
+ * fallback: tabela "produtos" com estoque/estoque_minimo
+ */
 async function loadEstoqueBaixo() {
-  const selectTries = [
-    "id,nome,estoque,estoque_minimo",
-    "id,nome,quantidade,estoque_minimo",
-    "id,nome,quantidade_atual,estoque_minimo",
-    "id,nome,qtd,estoque_minimo",
-    "id,nome,estoque,minimo",
-    "id,nome,quantidade,minimo",
-    "id,nome,qtd,minimo",
-    "id,descricao,estoque,estoque_minimo",
-    "id,descricao,quantidade,minimo",
-    "id,produto_nome,estoque,estoque_minimo",
-    "id,produto_nome,quantidade,minimo",
+  const tries = [
+    {
+      table: "estoque",
+      cols: ["id", "categoria", "produto", "codigo", "cor", "tamanho", "qtd", "minimo"],
+      map: (r) => ({
+        id: normId(r.id),
+        categoria: r.categoria,
+        produto: r.produto,
+        codigo: r.codigo,
+        cor: r.cor,
+        tamanho: r.tamanho,
+        qtd: Number(r.qtd || 0),
+        minimo: Number(r.minimo || 0),
+      }),
+      isLow: (x) => Number(x.qtd || 0) < Number(x.minimo || 0),
+    },
+    {
+      table: "produtos",
+      cols: ["id", "categoria", "nome", "codigo", "cor", "tamanho", "estoque", "estoque_minimo"],
+      map: (r) => ({
+        id: normId(r.id),
+        categoria: r.categoria,
+        produto: r.nome,
+        codigo: r.codigo,
+        cor: r.cor,
+        tamanho: r.tamanho,
+        qtd: Number(r.estoque || 0),
+        minimo: Number(r.estoque_minimo || 0),
+      }),
+      isLow: (x) => Number(x.qtd || 0) < Number(x.minimo || 0),
+    },
   ];
 
-  // 1) tenta produtos
-  let r = await trySelect("produtos", selectTries, (q) => q.limit(8000));
+  for (const t of tries) {
+    const { data, error } = await sb.from(t.table).select(t.cols.join(",")).limit(500);
+    if (error) continue;
 
-  // 2) tenta estoque
-  if (!r.ok) {
-    r = await trySelect("estoque", selectTries, (q) => q.limit(8000));
+    const rows = (data || []).map(t.map).filter((x) => Number.isFinite(x.qtd) && Number.isFinite(x.minimo));
+    const low = rows.filter(t.isLow).sort((a, b) => (a.qtd - a.minimo) - (b.qtd - b.minimo));
+    return { table: t.table, items: low.slice(0, 8) };
   }
 
-  if (!r.ok) return { ok: false, items: [], table: null };
-
-  const rows = r.data || [];
-  if (!rows.length) return { ok: true, items: [], table: r.table };
-
-  const sample = rows[0] || {};
-
-  const nomeKey =
-    sample.nome != null ? "nome" :
-    (sample.produto_nome != null ? "produto_nome" :
-    (sample.descricao != null ? "descricao" : "nome"));
-
-  const estoqueKey =
-    sample.estoque != null ? "estoque" :
-    (sample.quantidade_atual != null ? "quantidade_atual" :
-    (sample.quantidade != null ? "quantidade" :
-    (sample.qtd != null ? "qtd" : "estoque")));
-
-  const minimoKey =
-    sample.estoque_minimo != null ? "estoque_minimo" :
-    (sample.minimo != null ? "minimo" :
-    (sample.min_estoque != null ? "min_estoque" : "estoque_minimo"));
-
-  const items = rows
-    .map((p) => {
-      const est = Number(p[estoqueKey] ?? 0);
-      const min = Number(p[minimoKey] ?? 0);
-      return { id: p.id, nome: p[nomeKey], est, min };
-    })
-    .filter((x) => Number.isFinite(x.min) && x.min > 0 && Number.isFinite(x.est) && x.est <= x.min)
-    .sort((a, b) => a.est - b.est)
-    .slice(0, 12);
-
-  return { ok: true, items, table: r.table };
-}
-
-async function loadRelatorioPeriodo(inicioYYYYMMDD, fimYYYYMMDD) {
-  const ini = `${inicioYYYYMMDD}T00:00:00.000Z`;
-  const fim = `${fimYYYYMMDD}T23:59:59.999Z`;
-
-  let rows = await safeQuery(() =>
-    sb.from("vendas").select("id,total,data").gte("data", ini).lte("data", fim).limit(20000)
-  );
-
-  if (rows === null) {
-    rows = await safeQuery(() =>
-      sb.from("vendas").select("id,total,created_at").gte("created_at", ini).lte("created_at", fim).limit(20000)
-    );
-  }
-
-  const list = Array.isArray(rows) ? rows : [];
-  const qtd = list.length;
-  const total = list.reduce((s, r) => s + Number(r.total || 0), 0);
-  const ticket = qtd ? total / qtd : 0;
-
-  return { qtd, total, ticket };
+  // nada encontrado
+  return { table: null, items: [] };
 }
 
 /* =========================
-   FILL UI
+   UI RENDER
 ========================= */
-async function fillDashboard() {
-  // Vendas hoje
-  const vendasHoje = await loadVendasHoje();
-  if (vendasHoje === null) {
-    setHtml("vHojeMsg", "Não consegui carregar vendas hoje.");
-  } else {
-    const qtd = vendasHoje.length;
-    const total = vendasHoje.reduce((s, v) => s + Number(v.total || 0), 0);
-    setHtml(
-      "vHojeMsg",
-      `<div style="font-weight:900; font-size:1.2rem;">${money(total)}</div>
-       <div class="small" style="opacity:.9;">${qtd} venda(s) hoje</div>`
-    );
-  }
+function renderDashboardLayout() {
+  const today = new Date();
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 7);
+  const startVal = toISODateYYYYMMDD(start);
+  const endVal = toISODateYYYYMMDD(today);
 
-  // Crediário: resumo + próxima parcela
-  const cred = await loadCrediarioResumoComProxima();
-  const pp = cred?.proximaParcela;
+  return `
+    <style>
+      .dash-kpi { font-size: 1.2rem; font-weight: 900; margin-top: 6px; }
+      .dash-sub { opacity: .9; margin-top: 4px; }
+      .dash-list { margin-top: 10px; display: grid; gap: 8px; }
+      .dash-item {
+        display:flex; justify-content:space-between; gap:12px; align-items:flex-start;
+        padding: 10px; border-radius: 12px;
+        background: rgba(255,255,255,.03);
+        border: 1px solid rgba(255,255,255,.06);
+      }
+      .dash-item b { font-weight: 800; }
+      .muted { opacity:.85; }
+      .dash-btnrow { margin-top: 10px; display:flex; gap:10px; flex-wrap: wrap; }
+      .mini { font-size: .85rem; opacity: .9; }
+    </style>
 
-  let blocoProxima = `<div class="small" style="opacity:.9;">Sem parcelas em aberto ✅</div>`;
-  if (pp) {
-    const cliente = pp?.venda?.cliente_nome || "Cliente";
-    const tel = pp?.venda?.cliente_telefone || "";
-    blocoProxima = `
-      <div class="card" style="margin-top:10px; padding:12px;">
-        <div style="font-weight:900;">Próxima parcela</div>
-        <div class="small" style="margin-top:6px;">
-          <b>${escapeHtml(cliente)}</b> ${tel ? `• ${escapeHtml(tel)}` : ""}
+    <div class="grid cols-3">
+      <div class="card" id="cardVendasHoje">
+        <div class="card-title">Vendas Hoje</div>
+        <div class="card-sub">Resumo do dia</div>
+        <div class="dash-kpi" id="vhTotal">—</div>
+        <div class="dash-sub mini" id="vhQtd">—</div>
+      </div>
+
+      <div class="card" id="cardCrediario">
+        <div class="card-title">Crediário</div>
+        <div class="card-sub">Aberto e próxima parcela</div>
+        <div class="dash-kpi" id="crAberto">—</div>
+
+        <div class="dash-list" id="crProxBox">
+          <div class="mini muted">Carregando próxima parcela...</div>
         </div>
-        <div class="small" style="margin-top:4px;">
-          Venc: <b>${fmtDateBR(pp.vencimento)}</b> • Nº <b>${Number(pp.numero || 0)}</b>
-        </div>
-        <div class="small" style="margin-top:4px;">
-          Saldo: <b>${money(pp.saldo)}</b>
-        </div>
-        <div style="margin-top:10px;">
-          <button class="btn primary" id="goCred">Abrir no Crediário</button>
+
+        <div class="dash-btnrow">
+          <button class="btn primary" id="btnAbrirCred">Abrir no Crediário</button>
         </div>
       </div>
-    `;
-  }
 
-  setHtml(
-    "credMsg",
-    `<div class="small"><b>Vencidas:</b> ${cred.vencidasCount}</div>
-     <div class="small"><b>Próx. 7 dias:</b> ${cred.proximas7Count}</div>
-     <div style="margin-top:8px; font-weight:900; font-size:1.05rem;">Aberto: ${money(cred.totalAberto)}</div>
-     ${blocoProxima}`
-  );
+      <div class="card" id="cardEstoqueBaixo">
+        <div class="card-title">Estoque Baixo</div>
+        <div class="card-sub">Itens abaixo do mínimo</div>
 
-  // bind botão abrir crediário
-  const btn = document.getElementById("goCred");
-  if (btn) {
-    btn.addEventListener("click", () => {
-      window.location.hash = "#crediario";
-    });
-  }
+        <div class="dash-list" id="ebList">
+          <div class="mini muted">Carregando estoque baixo...</div>
+        </div>
 
-  // Estoque baixo
-  const est = await loadEstoqueBaixo();
-  if (!est.ok) {
-    setHtml(
-      "estMsg",
-      `Não encontrei as tabelas <b>produtos</b> nem <b>estoque</b> com colunas compatíveis.<br/>
-       (Se você me disser o nome exato da tabela/colunas eu deixo perfeito.)`
-    );
-  } else if (!est.items.length) {
-    setHtml("estMsg", `Nenhum item abaixo do mínimo ✅`);
-  } else {
-    setHtml(
-      "estMsg",
-      `<div class="small" style="margin-bottom:8px;"><b>${est.items.length}</b> item(ns) críticos</div>
-       <div class="small" style="opacity:.75; margin-bottom:8px;">Fonte: tabela <b>${escapeHtml(est.table)}</b></div>
-       <div class="small" style="display:grid; gap:6px;">
-         ${est.items
-           .map(
-             (p) =>
-               `<div style="display:flex; justify-content:space-between; gap:10px;">
-                  <span>${escapeHtml(p.nome || "-")}</span>
-                  <span><b>${p.est}</b> / min ${p.min}</span>
-                </div>`
-           )
-           .join("")}
-       </div>`
-    );
-  }
+        <div class="dash-btnrow">
+          <button class="btn" id="btnAbrirEstoque">Abrir Estoque</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-top:14px;">
+      <div class="card" id="cardRelatorio">
+        <div class="card-title">Relatório por período</div>
+        <div class="card-sub">Total e quantidade</div>
+
+        <div class="grid grid-3" style="gap:10px; margin-top:12px; align-items:end;">
+          <div class="field">
+            <label>Início</label>
+            <input class="input" type="date" id="rpIni" value="${startVal}" />
+          </div>
+          <div class="field">
+            <label>Fim</label>
+            <input class="input" type="date" id="rpFim" value="${endVal}" />
+          </div>
+          <div>
+            <button class="btn primary" id="rpAplicar">Aplicar</button>
+          </div>
+        </div>
+
+        <div style="margin-top:12px;">
+          <div class="dash-kpi" id="rpTotal">—</div>
+          <div class="dash-sub mini" id="rpQtd">Selecione um período.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Resumo rápido</div>
+        <div class="card-sub">Visão geral</div>
+        <div class="dash-list">
+          <div class="dash-item"><span>Vendas hoje</span><b id="sumVendas">—</b></div>
+          <div class="dash-item"><span>Aberto no crediário</span><b id="sumCred">—</b></div>
+          <div class="dash-item"><span>Itens com estoque baixo</span><b id="sumEstoque">—</b></div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
-function bindPeriodo() {
-  const ini = document.getElementById("rpIni");
-  const fim = document.getElementById("rpFim");
-  const out = document.getElementById("rpOut");
-  const btn = document.getElementById("rpBtn");
+function renderEstoqueBaixoList(items) {
+  const box = document.getElementById("ebList");
+  const sum = document.getElementById("sumEstoque");
+  if (!box) return;
 
-  if (ini && fim) {
-    // padrão: últimos 7 dias
-    const d1 = new Date();
-    d1.setDate(d1.getDate() - 7);
-    const yyyy = d1.getFullYear();
-    const mm = String(d1.getMonth() + 1).padStart(2, "0");
-    const dd = String(d1.getDate()).padStart(2, "0");
-    ini.value = `${yyyy}-${mm}-${dd}`;
-    fim.value = todayDateOnly();
+  if (!items?.length) {
+    box.innerHTML = `<div class="mini muted">Nenhum item abaixo do mínimo ✅</div>`;
+    if (sum) sum.textContent = "0";
+    return;
   }
 
-  btn?.addEventListener("click", async () => {
-    const i = ini?.value;
-    const f = fim?.value;
+  if (sum) sum.textContent = String(items.length);
 
-    if (!i || !f) return (out.textContent = "Selecione início e fim.");
-    if (i > f) return (out.textContent = "Início não pode ser maior que fim.");
+  box.innerHTML = items
+    .map((x) => {
+      const nome = [x.produto, x.cor, x.tamanho].filter(Boolean).join(" • ");
+      const cod = x.codigo ? `(${x.codigo})` : "";
+      return `
+        <div class="dash-item">
+          <div>
+            <b>${escapeHtml(nome || "Produto")}</b> <span class="mini muted">${escapeHtml(cod)}</span>
+            <div class="mini muted">${escapeHtml(x.categoria || "")}</div>
+          </div>
+          <div style="text-align:right;">
+            <div><b>${Number(x.qtd || 0)}</b> / mín. ${Number(x.minimo || 0)}</div>
+            <div class="mini muted">Baixo</div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
 
-    out.textContent = "Carregando relatório...";
-    const r = await loadRelatorioPeriodo(i, f);
-    if (!r) return (out.textContent = "Erro ao carregar relatório.");
+function renderCrediarioBox(data) {
+  const abertoEl = document.getElementById("crAberto");
+  const proxBox = document.getElementById("crProxBox");
+  const sumCred = document.getElementById("sumCred");
 
-    out.innerHTML = `
-      <div class="small"><b>Período:</b> ${fmtDateBR(i)} → ${fmtDateBR(f)}</div>
-      <div style="margin-top:8px; font-weight:900; font-size:1.15rem;">${money(r.total)}</div>
-      <div class="small" style="opacity:.9;">${r.qtd} venda(s) • Ticket médio ${money(r.ticket)}</div>
-    `;
-  });
+  const aberto = Number(data?.abertoTotal || 0);
+  if (abertoEl) abertoEl.textContent = `Aberto: ${money(aberto)}`;
+  if (sumCred) sumCred.textContent = money(aberto);
+
+  if (!proxBox) return;
+
+  const p = data?.proxParcela;
+  if (!p) {
+    proxBox.innerHTML = `<div class="mini muted">Sem parcelas em aberto ✅</div>`;
+    return;
+  }
+
+  proxBox.innerHTML = `
+    <div class="dash-item">
+      <div>
+        <b>Próxima parcela</b>
+        <div class="mini muted">${escapeHtml(p.cliente_nome || "-")} • ${escapeHtml(p.cliente_telefone || "")}</div>
+        <div class="mini">Venc: <b>${fmtDateBR(p.vencimento)}</b> • Nº <b>${Number(p.parcela_numero || 0)}</b></div>
+      </div>
+      <div style="text-align:right;">
+        <div><b>${money(p.saldo || 0)}</b></div>
+        <div class="mini muted">saldo</div>
+      </div>
+    </div>
+  `;
+}
+
+/* =========================
+   MAIN
+========================= */
+async function bootDashboard() {
+  // botões
+  const btnCred = document.getElementById("btnAbrirCred");
+  if (btnCred) btnCred.addEventListener("click", () => (location.hash = "#crediario"));
+
+  const btnEst = document.getElementById("btnAbrirEstoque");
+  if (btnEst) btnEst.addEventListener("click", () => (location.hash = "#estoque"));
+
+  // vendas hoje
+  try {
+    const { qtd, total } = await loadVendasHoje();
+    const vhTotal = document.getElementById("vhTotal");
+    const vhQtd = document.getElementById("vhQtd");
+    const sumVendas = document.getElementById("sumVendas");
+
+    if (vhTotal) vhTotal.textContent = money(total);
+    if (vhQtd) vhQtd.textContent = `${qtd} venda(s) hoje`;
+    if (sumVendas) sumVendas.textContent = money(total);
+  } catch (e) {
+    console.error(e);
+    const vhTotal = document.getElementById("vhTotal");
+    const vhQtd = document.getElementById("vhQtd");
+    if (vhTotal) vhTotal.textContent = "—";
+    if (vhQtd) vhQtd.textContent = "Erro ao carregar vendas hoje.";
+  }
+
+  // crediário
+  try {
+    const c = await loadCrediarioDashboard();
+    renderCrediarioBox(c);
+  } catch (e) {
+    console.error(e);
+    const abertoEl = document.getElementById("crAberto");
+    const proxBox = document.getElementById("crProxBox");
+    if (abertoEl) abertoEl.textContent = "Erro no crediário.";
+    if (proxBox) proxBox.innerHTML = `<div class="mini muted">${escapeHtml(e?.message || "Erro ao carregar crediário.")}</div>`;
+  }
+
+  // estoque baixo
+  try {
+    const { items } = await loadEstoqueBaixo();
+    renderEstoqueBaixoList(items);
+  } catch (e) {
+    console.error(e);
+    const box = document.getElementById("ebList");
+    if (box) box.innerHTML = `<div class="mini muted">${escapeHtml(e?.message || "Erro ao carregar estoque baixo.")}</div>`;
+  }
+
+  // relatório por período
+  const rpAplicar = document.getElementById("rpAplicar");
+  if (rpAplicar) {
+    rpAplicar.addEventListener("click", async () => {
+      const ini = document.getElementById("rpIni")?.value;
+      const fim = document.getElementById("rpFim")?.value;
+      const rpTotal = document.getElementById("rpTotal");
+      const rpQtd = document.getElementById("rpQtd");
+
+      if (!ini || !fim) {
+        if (rpQtd) rpQtd.textContent = "Preencha início e fim.";
+        return;
+      }
+
+      const { startISO, endISO } = parseDateInputToISOStartEnd(ini, fim);
+
+      if (rpQtd) rpQtd.textContent = "Carregando...";
+      try {
+        const r = await loadVendasPeriodo(startISO, endISO);
+        if (rpTotal) rpTotal.textContent = money(r.total);
+        if (rpQtd) rpQtd.textContent = `${r.qtd} venda(s) no período`;
+      } catch (e) {
+        console.error(e);
+        if (rpTotal) rpTotal.textContent = "—";
+        if (rpQtd) rpQtd.textContent = e?.message || "Erro ao gerar relatório.";
+      }
+    });
+  }
 }
 
 /* =========================
    EXPORT
 ========================= */
 export async function renderDashboard() {
-  const html = layout();
+  const html = renderDashboardLayout();
 
-  setTimeout(async () => {
-    try {
-      bindPeriodo();
-      await fillDashboard();
-    } catch (e) {
-      console.error(e);
-      setHtml("vHojeMsg", "Erro ao carregar.");
-      setHtml("credMsg", "Erro ao carregar.");
-      setHtml("estMsg", "Erro ao carregar.");
-    }
+  setTimeout(() => {
+    bootDashboard().catch((e) => console.error(e));
   }, 0);
 
   return html;
