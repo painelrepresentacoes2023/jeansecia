@@ -888,13 +888,14 @@ function bindVendas() {
     .map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)
     .join("");
 
-  // ✅ crediário bindings com signal
+    // ✅ crediário bindings com signal
   document.getElementById("vForma")?.addEventListener("change", updateCrediarioInfo, { signal });
   document.getElementById("vParcelas")?.addEventListener("change", updateCrediarioInfo, { signal });
   document.getElementById("vDiaVenc")?.addEventListener("change", updateCrediarioInfo, { signal });
 
   document.getElementById("vDesconto")?.addEventListener("input", () => {
     updateResumoOnly();
+    updateCrediarioInfo(); // ✅ recalcula parcela quando muda desconto
   }, { signal });
 
   updateCrediarioInfo();
@@ -971,6 +972,7 @@ function bindVendas() {
 
       renderItensVenda();
       clearVendaItemFields(true);
+      updateCrediarioInfo(); // ✅ se já tá no crediário, recalcula parcela
     },
     { signal }
   );
@@ -1008,6 +1010,22 @@ function bindVendas() {
         const forma = document.getElementById("vForma").value;
         if (!forma) return (msg.textContent = "Selecione a forma.");
 
+        // ✅ pega campos do crediário (só se for crediário)
+        let numero_parcelas = null;
+        let dia_vencimento = null;
+
+        if (isCrediarioForma(forma)) {
+          numero_parcelas = Number(document.getElementById("vParcelas")?.value || 1);
+          dia_vencimento = Number(document.getElementById("vDiaVenc")?.value || 10);
+
+          if (!numero_parcelas || numero_parcelas < 1 || numero_parcelas > 24) {
+            return (msg.textContent = "Número de parcelas inválido (1 a 24).");
+          }
+          if (!dia_vencimento || dia_vencimento < 1 || dia_vencimento > 28) {
+            return (msg.textContent = "Dia de vencimento inválido (1 a 28).");
+          }
+        }
+
         let oldItens = [];
         if (state.editVendaId) {
           oldItens = await loadVendaItens(state.editVendaId);
@@ -1029,6 +1047,7 @@ function bindVendas() {
 
         const { subtotal, desconto, total } = calcResumoVenda();
 
+        // ✅ payload com os nomes REAIS da tabela vendas
         const payload = {
           data: isoFromDatetimeLocal(dataLocal),
           forma,
@@ -1038,6 +1057,10 @@ function bindVendas() {
           subtotal: Number(subtotal.toFixed(2)),
           total: Number(total.toFixed(2)),
           observacoes: document.getElementById("vObs").value.trim() || null,
+
+          // ✅ crediário (só preenche quando for crediário)
+          numero_parcelas,
+          dia_vencimento,
         };
 
         msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
@@ -1064,8 +1087,7 @@ function bindVendas() {
         msg.textContent = `OK ✅ Total: ${money(total)}`;
         setTimeout(() => (msg.textContent = ""), 1200);
 
-        // (o pulo automático pro crediário a gente faz no PASSO 2,
-        // junto com gerar parcelas no banco)
+        // (o pulo automático pro crediário a gente faz depois)
 
       } catch (e) {
         console.error(e);
@@ -1093,6 +1115,7 @@ function bindVendas() {
     });
   }
 }
+
 
 /* =========================
    MODAL ITENS (EDITAR VENDA)
