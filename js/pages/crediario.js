@@ -23,23 +23,37 @@ function money(n) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+/**
+ * ✅ Corrige o bug do “volta 1 dia” em campos DATE (YYYY-MM-DD)
+ * Postgres DATE não tem hora, mas new Date("YYYY-MM-DD") cai em UTC e no -03 volta.
+ */
 function fmtDateBR(iso) {
   if (!iso) return "-";
 
-  // Se vier "YYYY-MM-DD" (tipo DATE do Postgres), cria data LOCAL (sem UTC)
   const s = String(iso).slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const [y, m, d] = s.split("-").map(Number);
-    const dt = new Date(y, m - 1, d); // local
+    const dt = new Date(y, m - 1, d); // local timezone
     return dt.toLocaleDateString("pt-BR");
   }
 
-  // Se vier timestamptz/iso completo, usa normal
   const d2 = new Date(iso);
   if (Number.isNaN(d2.getTime())) return String(iso);
   return d2.toLocaleDateString("pt-BR");
 }
 
+function normId(v) {
+  if (v == null) return "";
+  return String(v).trim();
+}
+
+// ✅ “apelido” pra nunca mais quebrar se escapar normId em algum lugar
+const normId = normId;
+
+function clamp0(n) {
+  const x = Number(n || 0);
+  return x < 0 ? 0 : x;
+}
 
 /* =========================
    STATE
@@ -48,7 +62,7 @@ const state = {
   cred: [],
   parcelas: [],
   vendaSelecionada: null,
-  crediFormas: [], // valores do enum forma_pagamento que são credi*
+  crediFormas: [],
 };
 
 window.__crediarioState = state;
@@ -66,20 +80,17 @@ async function loadCrediFormas() {
   let vals = [];
   try {
     vals = await loadEnumValues("forma_pagamento");
-  } catch (e) {
+  } catch {
     vals = [];
   }
-
   const filtered = (vals || []).filter((v) => String(v).toLowerCase().includes("credi"));
-
-  // fallback duro
   if (!filtered.length) return ["crediario", "crediário", "credi"];
   return filtered;
 }
 
 /**
  * ✅ Lista SOMENTE vendas do crediário
- * ✅ NÃO usa ILIKE no enum (era o erro do print)
+ * ✅ NÃO usa ILIKE no enum (evita o erro do operador)
  * ✅ Calcula total_pago / saldo_aberto pelas parcelas
  */
 async function loadCrediario() {
@@ -117,7 +128,7 @@ async function loadCrediario() {
 
   if (e2) throw e2;
 
-  const acc = new Map(); // venda_id -> { total_pago }
+  const acc = new Map(); // venda_id -> total_pago
   for (const p of parc || []) {
     const vid = normId(p.venda_id);
     if (!vid) continue;
@@ -164,10 +175,13 @@ async function loadParcelas(vendaId) {
 }
 
 /* =========================
-   PARCELA: marcar como paga (sem RPC)
+   PARCELA: marcar como paga
 ========================= */
-function isPaga(p) {
-  return String(p?.status || "").toLowerCase().includes("pag");
+function isQuitada(parcela) {
+  const valor = Number(parcela?.valor || 0);
+  const pagoAc = Number(parcela?.valor_pago_acumulado || 0);
+  const saldo = Number((valor - pagoAc).toFixed(2));
+  return saldo <= 0.009 || String(parcela?.status || "").toLowerCase().includes("pag");
 }
 
 async function marcarParcelaComoPaga(parcela) {
@@ -177,8 +191,10 @@ async function marcarParcelaComoPaga(parcela) {
   const valor = Number(parcela?.valor || 0);
   if (!Number.isFinite(valor) || valor <= 0) throw new Error("Valor da parcela inválido.");
 
-  // tenta "paga" (conforme seu pedido), se o enum for diferente o Supabase vai devolver erro e você me manda o texto
-  const patch = { status: "paga", valor_pago_acumulado: Number(valor.toFixed(2)) };
+  const patch = {
+    status: "paga",
+    valor_pago_acumulado: Number(valor.toFixed(2)),
+  };
 
   const { error } = await sb.from("parcelas").update(patch).eq("id", pid);
   if (error) throw error;
@@ -190,7 +206,6 @@ async function marcarParcelaComoPaga(parcela) {
 function renderCrediarioLayout() {
   return `
     <style>
-      /* ===== tabela sem cortar ===== */
       .table-wrap{
         overflow:auto;
         max-width:100%;
@@ -235,16 +250,7 @@ function renderCrediarioLayout() {
         font-weight: 800;
         font-size: 1.05rem;
       }
-      .cModalClose{
-        border-radius: 12px;
-      }
-
-      /* tabela de parcelas dentro do modal */
       .pTable{ min-width: 860px; }
-      @media (max-width: 980px){
-        .table{ min-width: 960px; }
-        .pTable{ min-width: 980px; }
-      }
     </style>
 
     <div class="card">
@@ -289,9 +295,8 @@ function renderCrediarioLayout() {
             <div class="cModalTitle" id="cModalTitle">Detalhes</div>
             <div class="small" id="cModalSub">—</div>
           </div>
-          <button class="btn cModalClose" id="cModalClose">Fechar</button>
+          <button class="btn" id="cModalClose">Fechar</button>
         </div>
-
         <div id="cModalBody" class="small">Carregando...</div>
       </div>
     </div>
@@ -339,9 +344,7 @@ function renderTabelaCred(filtro = "") {
           <td>${money(r.total_pago || 0)}</td>
           <td>${money(r.saldo_aberto || 0)}</td>
           <td>${status}</td>
-          <td>
-            <button class="btn primary" data-open="${vid}">Ver detalhes</button>
-          </td>
+          <td><button class="btn primary" data-open="${vid}">Ver detalhes</button></td>
         </tr>
       `;
     })
@@ -361,7 +364,6 @@ function renderTabelaCred(filtro = "") {
 function modalEls() {
   return {
     backdrop: document.getElementById("cModalBackdrop"),
-    close: document.getElementById("cModalClose"),
     title: document.getElementById("cModalTitle"),
     sub: document.getElementById("cModalSub"),
     body: document.getElementById("cModalBody"),
@@ -382,21 +384,30 @@ function closeModal() {
   backdrop.setAttribute("aria-hidden", "true");
 }
 
+/**
+ * ✅ Fechar do modal 100%: delegação no document (não falha mesmo com re-render)
+ */
 function bindModalOnce() {
   if (window.__credModalBound) return;
   window.__credModalBound = true;
 
-  const { backdrop, close } = modalEls();
-  if (close) close.addEventListener("click", closeModal);
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
 
-  // clica fora fecha
-  if (backdrop) {
-    backdrop.addEventListener("click", (ev) => {
-      if (ev.target === backdrop) closeModal();
-    });
-  }
+    // botão fechar
+    if (t && t.id === "cModalClose") {
+      ev.preventDefault();
+      closeModal();
+      return;
+    }
 
-  // ESC fecha
+    // clicou fora (backdrop)
+    const backdrop = document.getElementById("cModalBackdrop");
+    if (backdrop && t === backdrop) {
+      closeModal();
+    }
+  });
+
   window.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") closeModal();
   });
@@ -432,11 +443,7 @@ function renderModalDetalhes() {
   const parcelas = state.parcelas || [];
   const { sub, body } = modalEls();
 
-  if (!venda) {
-    if (sub) sub.textContent = "Nenhuma venda.";
-    if (body) body.innerHTML = `<div class="small">Nenhuma venda selecionada.</div>`;
-    return;
-  }
+  if (!venda || !body) return;
 
   const total = Number(venda.total || 0);
   const pago = Number(venda.total_pago || 0);
@@ -445,8 +452,6 @@ function renderModalDetalhes() {
   const statusVenda = isQuitado(venda) ? "Pago ✅" : "Em aberto";
 
   if (sub) sub.textContent = `${venda.cliente_nome || "Cliente"} • ${venda.cliente_telefone || ""}`;
-
-  if (!body) return;
 
   body.innerHTML = `
     <div class="card" style="margin-bottom:12px;">
@@ -493,7 +498,7 @@ function renderModalDetalhes() {
                       const valor = Number(p.valor || 0);
                       const pagoAc = Number(p.valor_pago_acumulado || 0);
                       const saldo = Number((valor - pagoAc).toFixed(2));
-                      const paga = isPaga(p) || saldo <= 0.009;
+                      const quit = isQuitada(p);
 
                       return `
                         <tr>
@@ -502,10 +507,10 @@ function renderModalDetalhes() {
                           <td>${money(valor)}</td>
                           <td>${money(pagoAc)}</td>
                           <td>${money(clamp0(saldo))}</td>
-                          <td>${paga ? "paga" : escapeHtml(String(p.status || "aberta"))}</td>
+                          <td>${quit ? "paga" : escapeHtml(String(p.status || "aberta"))}</td>
                           <td>
                             ${
-                              paga
+                              quit
                                 ? `<span class="small">—</span>`
                                 : `<button class="btn primary" data-pay="${escapeHtml(pid)}">Marcar como paga</button>`
                             }
@@ -524,36 +529,6 @@ function renderModalDetalhes() {
     </div>
   `;
 
-function bindModalOnce() {
-  if (window.__credModalBound) return;
-  window.__credModalBound = true;
-
-  // Delegação: funciona mesmo se o botão for recriado/re-render
-  document.addEventListener("click", (ev) => {
-    const t = ev.target;
-
-    // botão fechar
-    if (t && t.id === "cModalClose") {
-      ev.preventDefault();
-      closeModal();
-      return;
-    }
-
-    // clicou no backdrop (fora do modal)
-    const backdrop = document.getElementById("cModalBackdrop");
-    if (backdrop && t === backdrop) {
-      closeModal();
-    }
-  });
-
-  // ESC fecha
-  window.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") closeModal();
-  });
-}
-
-   
-  // bind botões "Marcar como paga"
   const tbody = body.querySelector("#parcTbody");
   const modalMsg = body.querySelector("#modalMsg");
 
@@ -568,14 +543,13 @@ function bindModalOnce() {
       try {
         await marcarParcelaComoPaga(parcela);
 
-        // recarrega tudo pra atualizar totals + parcelas
+        // recarrega para atualizar total/pago/aberto
         state.cred = await loadCrediario();
         state.parcelas = await loadParcelas(venda.venda_id);
 
-        // atualiza vendaSelecionada (pra atualizar total/pago/aberto)
-        state.vendaSelecionada = (state.cred || []).find((v) => normId(v.venda_id) === normId(venda.venda_id)) || venda;
+        state.vendaSelecionada =
+          (state.cred || []).find((v) => normId(v.venda_id) === normId(venda.venda_id)) || venda;
 
-        // re-render lista e modal
         renderTabelaCred(document.getElementById("fCred")?.value || "");
         renderModalDetalhes();
 
@@ -600,6 +574,7 @@ export async function renderCrediario() {
     setTimeout(async () => {
       try {
         showToast("", "info");
+        bindModalOnce();
 
         state.crediFormas = await loadCrediFormas();
         state.cred = await loadCrediario();
@@ -607,12 +582,7 @@ export async function renderCrediario() {
         renderTabelaCred("");
 
         const f = document.getElementById("fCred");
-        if (f) {
-          f.addEventListener("input", (e) => renderTabelaCred(e.target.value));
-        }
-
-        // bind modal
-        bindModalOnce();
+        if (f) f.addEventListener("input", (e) => renderTabelaCred(e.target.value));
       } catch (e) {
         console.error(e);
         showToast(e?.message || "Erro ao iniciar Crediário.", "error");
