@@ -3,6 +3,11 @@ import { sb } from "../supabase.js";
 /* =========================
    HELPERS
 ========================= */
+function money(n) {
+  const v = Number(n || 0);
+  return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+}
+
 function escapeHtml(s = "") {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -12,21 +17,13 @@ function escapeHtml(s = "") {
     .replaceAll("'", "&#039;");
 }
 
-function money(n) {
-  const v = Number(n || 0);
-  return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-}
-
-/**
- * Corrige bug do “volta 1 dia” em DATE (YYYY-MM-DD)
- */
+/** Corrige bug do "volta 1 dia" (DATE YYYY-MM-DD) */
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const s = String(iso).slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const [y, m, d] = s.split("-").map(Number);
-    const dt = new Date(y, m - 1, d);
-    return dt.toLocaleDateString("pt-BR");
+    return new Date(y, m - 1, d).toLocaleDateString("pt-BR");
   }
   const d2 = new Date(iso);
   if (Number.isNaN(d2.getTime())) return String(iso);
@@ -43,433 +40,438 @@ function clamp0(n) {
   return x < 0 ? 0 : x;
 }
 
-/**
- * Intervalo do dia (local) em ISO (pra filtrar timestamp)
- */
-function getTodayRangeISO() {
+function pickKey(obj, keys) {
+  if (!obj) return null;
+  const lowerMap = new Map(Object.keys(obj).map((k) => [k.toLowerCase(), k]));
+  for (const k of keys) {
+    const real = lowerMap.get(String(k).toLowerCase());
+    if (real) return real;
+  }
+  return null;
+}
+
+/** Hoje (00:00:00 -> 23:59:59) no fuso local */
+function todayRangeISO() {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-  return { startISO: start.toISOString(), endISO: end.toISOString() };
-}
-
-function toISODateYYYYMMDD(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
-
-function parseDateInputToISOStartEnd(startYYYYMMDD, endYYYYMMDD) {
-  // inclui o dia final inteiro
-  const [sy, sm, sd] = startYYYYMMDD.split("-").map(Number);
-  const [ey, em, ed] = endYYYYMMDD.split("-").map(Number);
-  const start = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
-  const end = new Date(ey, em - 1, ed + 1, 0, 0, 0, 0);
-  return { startISO: start.toISOString(), endISO: end.toISOString() };
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  return { start: start.toISOString(), end: end.toISOString() };
 }
 
 /* =========================
-   LOADERS
+   LOADERS (DASH)
 ========================= */
 async function loadVendasHoje() {
-  const { startISO, endISO } = getTodayRangeISO();
-  const { data, error } = await sb
+  const { start, end } = todayRangeISO();
+
+  // tenta buscar por "data" (se for timestamp) ou por created_at como fallback
+  let data = [];
+  let error = null;
+
+  // 1) tenta por data
+  ({ data, error } = await sb
     .from("vendas")
     .select("id,total,data,created_at")
-    .gte("data", startISO)
-    .lt("data", endISO);
+    .gte("data", start)
+    .lte("data", end));
+
+  // 2) fallback: created_at
+  if (error) {
+    ({ data, error } = await sb
+      .from("vendas")
+      .select("id,total,data,created_at")
+      .gte("created_at", start)
+      .lte("created_at", end));
+  }
 
   if (error) throw error;
 
   const rows = data || [];
   const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
-  return { qtd: rows.length, total };
+  return { count: rows.length, total: Number(total.toFixed(2)) };
 }
 
-async function loadVendasPeriodo(startISO, endISO) {
-  const { data, error } = await sb
+/** pega formas do enum contendo "credi" (igual crediario.js) */
+async function loadCrediFormas() {
+  try {
+    const { data, error } = await sb.rpc("enum_values", { enum_type: "forma_pagamento" });
+    if (error) throw error;
+    const vals = (data || []).map((x) => x.value);
+    const filtered = vals.filter((v) => String(v).toLowerCase().includes("credi"));
+    return filtered.length ? filtered : ["crediario", "crediário", "credi"];
+  } catch {
+    return ["crediario", "crediário", "credi"];
+  }
+}
+
+/** total aberto do crediário + próxima parcela aberta a vencer */
+async function loadCrediarioResumo() {
+  const formas = await loadCrediFormas();
+
+  // busca vendas crediário
+  const { data: vendas, error: e1 } = await sb
     .from("vendas")
-    .select("id,total,data")
-    .gte("data", startISO)
-    .lt("data", endISO);
-
-  if (error) throw error;
-
-  const rows = data || [];
-  const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
-  return { qtd: rows.length, total };
-}
-
-/**
- * Crediário (dashboard):
- * - Total em aberto (somando saldo das parcelas abertas)
- * - Próxima parcela a vencer (a mais próxima em vencimento, ainda aberta)
- */
-async function loadCrediarioDashboard() {
-  // Pega parcelas em aberto (não pagas)
-  const { data: parc, error: e1 } = await sb
-    .from("parcelas")
-    .select("id,venda_id,numero,vencimento,valor,valor_pago_acumulado,status")
-    .order("vencimento", { ascending: true })
-    .limit(500);
+    .select("id,cliente_nome,cliente_telefone,total,forma,data")
+    .in("forma", formas)
+    .order("data", { ascending: false })
+    .limit(300);
 
   if (e1) throw e1;
 
-  const parcelas = (parc || []).map((p) => {
-    const valor = Number(p.valor || 0);
-    const pago = Number(p.valor_pago_acumulado || 0);
-    const saldo = Number((valor - pago).toFixed(2));
-    const status = String(p.status || "").toLowerCase();
-    const quitada = saldo <= 0.009 || status.includes("pag");
-    return {
-      ...p,
-      venda_id: normId(p.venda_id),
-      saldo: clamp0(saldo),
-      quitada,
-    };
-  });
-
-  const abertas = parcelas.filter((p) => !p.quitada);
-  const abertoTotal = abertas.reduce((acc, p) => acc + Number(p.saldo || 0), 0);
-
-  // próxima parcela = a menor vencimento (já está ordenado), dentre as abertas
-  const prox = abertas.length ? abertas[0] : null;
-
-  let vendaInfo = null;
-  if (prox?.venda_id) {
-    // tenta buscar cliente da venda
-    const { data: vData, error: vErr } = await sb
-      .from("vendas")
-      .select("id,cliente_nome,cliente_telefone,forma,total")
-      .eq("id", prox.venda_id)
-      .maybeSingle();
-
-    if (!vErr) vendaInfo = vData || null;
+  const v = (vendas || []).map((r) => ({ ...r, id: normId(r.id) })).filter((r) => r.id);
+  if (!v.length) {
+    return { abertoTotal: 0, proxima: null };
   }
 
-  return {
-    abertoTotal: Number(abertoTotal.toFixed(2)),
-    proxParcela: prox
-      ? {
-          parcela_numero: Number(prox.numero || 0),
-          vencimento: prox.vencimento,
-          saldo: Number((prox.saldo || 0).toFixed(2)),
-          venda_id: prox.venda_id,
-          cliente_nome: vendaInfo?.cliente_nome || "",
-          cliente_telefone: vendaInfo?.cliente_telefone || "",
-        }
-      : null,
-  };
+  const ids = v.map((x) => x.id);
+
+  // parcelas abertas (status != paga) e ordena por vencimento
+  const { data: parc, error: e2 } = await sb
+    .from("parcelas")
+    .select("id,venda_id,numero,vencimento,valor,status,valor_pago_acumulado")
+    .in("venda_id", ids)
+    .order("vencimento", { ascending: true })
+    .order("numero", { ascending: true });
+
+  if (e2) throw e2;
+
+  const parcelas = (parc || []).map((p) => ({
+    ...p,
+    venda_id: normId(p.venda_id),
+    id: normId(p.id),
+  }));
+
+  // total aberto = soma (valor - pago) das parcelas não quitadas
+  let abertoTotal = 0;
+  let proxima = null;
+
+  for (const p of parcelas) {
+    const valor = Number(p.valor || 0);
+    const pago = Number(p.valor_pago_acumulado || 0);
+    const saldo = clamp0(Number((valor - pago).toFixed(2)));
+
+    const quitada =
+      saldo <= 0.009 || String(p.status || "").toLowerCase().includes("pag");
+
+    if (!quitada) {
+      abertoTotal += saldo;
+
+      if (!proxima) {
+        const venda = v.find((x) => x.id === p.venda_id);
+        proxima = {
+          venda_id: p.venda_id,
+          cliente_nome: venda?.cliente_nome || "-",
+          cliente_telefone: venda?.cliente_telefone || "",
+          vencimento: p.vencimento,
+          numero: p.numero,
+          saldo,
+        };
+      }
+    }
+  }
+
+  return { abertoTotal: Number(abertoTotal.toFixed(2)), proxima };
 }
 
 /**
- * Estoque baixo:
- * tenta primeiro tabela "estoque" com colunas do seu print:
- * categoria, produto, codigo, cor, tamanho, qtd, minimo
- * fallback: tabela "produtos" com estoque/estoque_minimo
+ * ✅ Estoque baixo: pega dados e filtra no JS:
+ * baixa quando qtd < minimo
+ * (sem tentar "comparar coluna com coluna" no Supabase)
  */
 async function loadEstoqueBaixo() {
-  const tries = [
-    {
-      table: "estoque",
-      cols: ["id", "categoria", "produto", "codigo", "cor", "tamanho", "qtd", "minimo"],
-      map: (r) => ({
-        id: normId(r.id),
-        categoria: r.categoria,
-        produto: r.produto,
-        codigo: r.codigo,
-        cor: r.cor,
-        tamanho: r.tamanho,
-        qtd: Number(r.qtd || 0),
-        minimo: Number(r.minimo || 0),
-      }),
-      isLow: (x) => Number(x.qtd || 0) < Number(x.minimo || 0),
-    },
-    {
-      table: "produtos",
-      cols: ["id", "categoria", "nome", "codigo", "cor", "tamanho", "estoque", "estoque_minimo"],
-      map: (r) => ({
-        id: normId(r.id),
-        categoria: r.categoria,
-        produto: r.nome,
-        codigo: r.codigo,
-        cor: r.cor,
-        tamanho: r.tamanho,
-        qtd: Number(r.estoque || 0),
-        minimo: Number(r.estoque_minimo || 0),
-      }),
-      isLow: (x) => Number(x.qtd || 0) < Number(x.minimo || 0),
-    },
-  ];
+  // tenta tabela mais provável
+  let data = null;
+  let error = null;
 
-  for (const t of tries) {
-    const { data, error } = await sb.from(t.table).select(t.cols.join(",")).limit(500);
-    if (error) continue;
-
-    const rows = (data || []).map(t.map).filter((x) => Number.isFinite(x.qtd) && Number.isFinite(x.minimo));
-    const low = rows.filter(t.isLow).sort((a, b) => (a.qtd - a.minimo) - (b.qtd - b.minimo));
-    return { table: t.table, items: low.slice(0, 8) };
+  ({ data, error } = await sb.from("estoque").select("*").limit(500));
+  if (error) {
+    // fallback comum
+    ({ data, error } = await sb.from("produtos").select("*").limit(500));
   }
+  if (error) throw error;
 
-  // nada encontrado
-  return { table: null, items: [] };
+  const rows = data || [];
+  if (!rows.length) return [];
+
+  // tenta descobrir nomes reais das colunas (pra funcionar mesmo se variar)
+  const sample = rows[0];
+
+  const kProduto = pickKey(sample, ["produto", "nome", "descricao", "produto_nome"]);
+  const kCodigo = pickKey(sample, ["codigo", "sku"]);
+  const kCategoria = pickKey(sample, ["categoria"]);
+  const kCor = pickKey(sample, ["cor"]);
+  const kTamanho = pickKey(sample, ["tamanho", "tam"]);
+
+  const kQtd = pickKey(sample, ["qtd", "quantidade", "estoque", "estoque_atual", "saldo"]);
+  const kMin = pickKey(sample, ["minimo", "estoque_minimo", "min_estoque", "min"]);
+
+  // se não achar qtd/min, não tem como
+  if (!kQtd || !kMin) return [];
+
+  const baixos = rows
+    .map((r) => {
+      const qtd = Number(r[kQtd] ?? 0);
+      const min = Number(r[kMin] ?? 0);
+      return {
+        raw: r,
+        produto: kProduto ? r[kProduto] : "—",
+        codigo: kCodigo ? r[kCodigo] : "",
+        categoria: kCategoria ? r[kCategoria] : "",
+        cor: kCor ? r[kCor] : "",
+        tamanho: kTamanho ? r[kTamanho] : "",
+        qtd,
+        min,
+      };
+    })
+    .filter((x) => Number.isFinite(x.qtd) && Number.isFinite(x.min) && x.min > 0 && x.qtd < x.min)
+    .sort((a, b) => (a.qtd - a.min) - (b.qtd - b.min));
+
+  return baixos.slice(0, 8); // top 8 no dashboard
 }
 
 /* =========================
-   UI RENDER
+   RENDER
 ========================= */
-function renderDashboardLayout() {
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 7);
-  const startVal = toISODateYYYYMMDD(start);
-  const endVal = toISODateYYYYMMDD(today);
-
+function renderLayout() {
   return `
-    <style>
-      .dash-kpi { font-size: 1.2rem; font-weight: 900; margin-top: 6px; }
-      .dash-sub { opacity: .9; margin-top: 4px; }
-      .dash-list { margin-top: 10px; display: grid; gap: 8px; }
-      .dash-item {
-        display:flex; justify-content:space-between; gap:12px; align-items:flex-start;
-        padding: 10px; border-radius: 12px;
-        background: rgba(255,255,255,.03);
-        border: 1px solid rgba(255,255,255,.06);
-      }
-      .dash-item b { font-weight: 800; }
-      .muted { opacity:.85; }
-      .dash-btnrow { margin-top: 10px; display:flex; gap:10px; flex-wrap: wrap; }
-      .mini { font-size: .85rem; opacity: .9; }
-    </style>
-
-    <div class="grid cols-3">
-      <div class="card" id="cardVendasHoje">
+    <div class="grid cols-1" style="gap:14px;">
+      <div class="card" id="dVendas">
         <div class="card-title">Vendas Hoje</div>
         <div class="card-sub">Resumo do dia</div>
-        <div class="dash-kpi" id="vhTotal">—</div>
-        <div class="dash-sub mini" id="vhQtd">—</div>
+        <div class="small" style="margin-top:10px;">Carregando...</div>
       </div>
 
-      <div class="card" id="cardCrediario">
+      <div class="card" id="dCred">
         <div class="card-title">Crediário</div>
         <div class="card-sub">Aberto e próxima parcela</div>
-        <div class="dash-kpi" id="crAberto">—</div>
-
-        <div class="dash-list" id="crProxBox">
-          <div class="mini muted">Carregando próxima parcela...</div>
-        </div>
-
-        <div class="dash-btnrow">
-          <button class="btn primary" id="btnAbrirCred">Abrir no Crediário</button>
-        </div>
+        <div class="small" style="margin-top:10px;">Carregando...</div>
       </div>
 
-      <div class="card" id="cardEstoqueBaixo">
+      <div class="card" id="dEstoque">
         <div class="card-title">Estoque Baixo</div>
         <div class="card-sub">Itens abaixo do mínimo</div>
-
-        <div class="dash-list" id="ebList">
-          <div class="mini muted">Carregando estoque baixo...</div>
-        </div>
-
-        <div class="dash-btnrow">
-          <button class="btn" id="btnAbrirEstoque">Abrir Estoque</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="grid cols-2" style="margin-top:14px;">
-      <div class="card" id="cardRelatorio">
-        <div class="card-title">Relatório por período</div>
-        <div class="card-sub">Total e quantidade</div>
-
-        <div class="grid grid-3" style="gap:10px; margin-top:12px; align-items:end;">
-          <div class="field">
-            <label>Início</label>
-            <input class="input" type="date" id="rpIni" value="${startVal}" />
-          </div>
-          <div class="field">
-            <label>Fim</label>
-            <input class="input" type="date" id="rpFim" value="${endVal}" />
-          </div>
-          <div>
-            <button class="btn primary" id="rpAplicar">Aplicar</button>
-          </div>
-        </div>
-
-        <div style="margin-top:12px;">
-          <div class="dash-kpi" id="rpTotal">—</div>
-          <div class="dash-sub mini" id="rpQtd">Selecione um período.</div>
-        </div>
+        <div class="small" style="margin-top:10px;">Carregando...</div>
       </div>
 
-      <div class="card">
-        <div class="card-title">Resumo rápido</div>
-        <div class="card-sub">Visão geral</div>
-        <div class="dash-list">
-          <div class="dash-item"><span>Vendas hoje</span><b id="sumVendas">—</b></div>
-          <div class="dash-item"><span>Aberto no crediário</span><b id="sumCred">—</b></div>
-          <div class="dash-item"><span>Itens com estoque baixo</span><b id="sumEstoque">—</b></div>
+      <div class="grid cols-2" style="margin-top:0;">
+        <div class="card" id="dRelatorio">
+          <div class="card-title">Relatório por período</div>
+          <div class="card-sub">Filtro de datas</div>
+
+          <div class="grid" style="grid-template-columns: 1fr 1fr auto; gap:10px; margin-top:12px; align-items:end;">
+            <div class="field">
+              <label>Início</label>
+              <input class="input" id="dIni" type="date" />
+            </div>
+            <div class="field">
+              <label>Fim</label>
+              <input class="input" id="dFim" type="date" />
+            </div>
+            <button class="btn primary" id="dAplicar">Aplicar</button>
+          </div>
+
+          <div class="small" style="margin-top:10px;" id="dRelMsg">Selecione um período.</div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Resumo rápido</div>
+          <div class="card-sub">Visão geral</div>
+          <div class="small" id="dResumo" style="margin-top:10px;">Carregando...</div>
         </div>
       </div>
     </div>
   `;
 }
 
-function renderEstoqueBaixoList(items) {
-  const box = document.getElementById("ebList");
-  const sum = document.getElementById("sumEstoque");
-  if (!box) return;
+function setResumo({ vendas, cred, estoque }) {
+  const el = document.getElementById("dResumo");
+  if (!el) return;
 
-  if (!items?.length) {
-    box.innerHTML = `<div class="mini muted">Nenhum item abaixo do mínimo ✅</div>`;
-    if (sum) sum.textContent = "0";
-    return;
-  }
+  const itensBaixos = (estoque || []).length;
 
-  if (sum) sum.textContent = String(items.length);
-
-  box.innerHTML = items
-    .map((x) => {
-      const nome = [x.produto, x.cor, x.tamanho].filter(Boolean).join(" • ");
-      const cod = x.codigo ? `(${x.codigo})` : "";
-      return `
-        <div class="dash-item">
-          <div>
-            <b>${escapeHtml(nome || "Produto")}</b> <span class="mini muted">${escapeHtml(cod)}</span>
-            <div class="mini muted">${escapeHtml(x.categoria || "")}</div>
-          </div>
-          <div style="text-align:right;">
-            <div><b>${Number(x.qtd || 0)}</b> / mín. ${Number(x.minimo || 0)}</div>
-            <div class="mini muted">Baixo</div>
-          </div>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function renderCrediarioBox(data) {
-  const abertoEl = document.getElementById("crAberto");
-  const proxBox = document.getElementById("crProxBox");
-  const sumCred = document.getElementById("sumCred");
-
-  const aberto = Number(data?.abertoTotal || 0);
-  if (abertoEl) abertoEl.textContent = `Aberto: ${money(aberto)}`;
-  if (sumCred) sumCred.textContent = money(aberto);
-
-  if (!proxBox) return;
-
-  const p = data?.proxParcela;
-  if (!p) {
-    proxBox.innerHTML = `<div class="mini muted">Sem parcelas em aberto ✅</div>`;
-    return;
-  }
-
-  proxBox.innerHTML = `
-    <div class="dash-item">
-      <div>
-        <b>Próxima parcela</b>
-        <div class="mini muted">${escapeHtml(p.cliente_nome || "-")} • ${escapeHtml(p.cliente_telefone || "")}</div>
-        <div class="mini">Venc: <b>${fmtDateBR(p.vencimento)}</b> • Nº <b>${Number(p.parcela_numero || 0)}</b></div>
-      </div>
-      <div style="text-align:right;">
-        <div><b>${money(p.saldo || 0)}</b></div>
-        <div class="mini muted">saldo</div>
-      </div>
-    </div>
+  el.innerHTML = `
+    • Vendas hoje: <b>${money(vendas?.total || 0)}</b> (${Number(vendas?.count || 0)} venda(s))<br/>
+    • Crediário aberto: <b>${money(cred?.abertoTotal || 0)}</b><br/>
+    • Itens com estoque baixo: <b>${itensBaixos}</b>
   `;
 }
 
 /* =========================
-   MAIN
+   INIT
 ========================= */
-async function bootDashboard() {
-  // botões
-  const btnCred = document.getElementById("btnAbrirCred");
-  if (btnCred) btnCred.addEventListener("click", () => (location.hash = "#crediario"));
+function setDateInputsDefault() {
+  const ini = document.getElementById("dIni");
+  const fim = document.getElementById("dFim");
 
-  const btnEst = document.getElementById("btnAbrirEstoque");
-  if (btnEst) btnEst.addEventListener("click", () => (location.hash = "#estoque"));
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const start = new Date(end);
+  start.setDate(end.getDate() - 7);
 
-  // vendas hoje
+  const toDateStr = (d) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+  };
+
+  if (ini) ini.value = toDateStr(start);
+  if (fim) fim.value = toDateStr(end);
+}
+
+async function initDashboard() {
+  setDateInputsDefault();
+
+  const dV = document.getElementById("dVendas");
+  const dC = document.getElementById("dCred");
+  const dE = document.getElementById("dEstoque");
+
+  let vendas = null;
+  let cred = null;
+  let estoque = [];
+
+  // VENDAS HOJE
   try {
-    const { qtd, total } = await loadVendasHoje();
-    const vhTotal = document.getElementById("vhTotal");
-    const vhQtd = document.getElementById("vhQtd");
-    const sumVendas = document.getElementById("sumVendas");
-
-    if (vhTotal) vhTotal.textContent = money(total);
-    if (vhQtd) vhQtd.textContent = `${qtd} venda(s) hoje`;
-    if (sumVendas) sumVendas.textContent = money(total);
+    vendas = await loadVendasHoje();
+    if (dV) {
+      dV.innerHTML = `
+        <div class="card-title">Vendas Hoje</div>
+        <div class="card-sub">Resumo do dia</div>
+        <div style="margin-top:10px; font-weight:900; font-size:1.2rem;">${money(vendas.total)}</div>
+        <div class="small">${vendas.count} venda(s) hoje</div>
+      `;
+    }
   } catch (e) {
     console.error(e);
-    const vhTotal = document.getElementById("vhTotal");
-    const vhQtd = document.getElementById("vhQtd");
-    if (vhTotal) vhTotal.textContent = "—";
-    if (vhQtd) vhQtd.textContent = "Erro ao carregar vendas hoje.";
+    if (dV) dV.querySelector(".small") && (dV.querySelector(".small").textContent = "Erro ao carregar vendas.");
   }
 
-  // crediário
+  // CREDIÁRIO
   try {
-    const c = await loadCrediarioDashboard();
-    renderCrediarioBox(c);
+    cred = await loadCrediarioResumo();
+    const prox = cred.proxima;
+    if (dC) {
+      dC.innerHTML = `
+        <div class="card-title">Crediário</div>
+        <div class="card-sub">Aberto e próxima parcela</div>
+
+        <div style="margin-top:10px; font-weight:900; font-size:1.2rem;">
+          Aberto: ${money(cred.abertoTotal)}
+        </div>
+
+        ${
+          prox
+            ? `
+              <div class="card" style="margin-top:12px; padding:12px;">
+                <div style="font-weight:800;">Próxima parcela</div>
+                <div class="small" style="margin-top:6px;">
+                  <b>${escapeHtml(prox.cliente_nome)}</b> • ${escapeHtml(prox.cliente_telefone || "")}<br/>
+                  Venc: <b>${fmtDateBR(prox.vencimento)}</b> • Nº <b>${Number(prox.numero || 0)}</b><br/>
+                  Saldo: <b>${money(prox.saldo)}</b>
+                </div>
+                <div style="margin-top:10px;">
+                  <a class="btn primary" href="#crediario">Abrir no Crediário</a>
+                </div>
+              </div>
+            `
+            : `<div class="small" style="margin-top:10px;">Nenhuma parcela em aberto ✅</div>`
+        }
+      `;
+    }
   } catch (e) {
     console.error(e);
-    const abertoEl = document.getElementById("crAberto");
-    const proxBox = document.getElementById("crProxBox");
-    if (abertoEl) abertoEl.textContent = "Erro no crediário.";
-    if (proxBox) proxBox.innerHTML = `<div class="mini muted">${escapeHtml(e?.message || "Erro ao carregar crediário.")}</div>`;
+    if (dC) dC.querySelector(".small") && (dC.querySelector(".small").textContent = "Erro ao carregar crediário.");
   }
 
-  // estoque baixo
+  // ESTOQUE BAIXO (CORREÇÃO PRINCIPAL)
   try {
-    const { items } = await loadEstoqueBaixo();
-    renderEstoqueBaixoList(items);
-  } catch (e) {
-    console.error(e);
-    const box = document.getElementById("ebList");
-    if (box) box.innerHTML = `<div class="mini muted">${escapeHtml(e?.message || "Erro ao carregar estoque baixo.")}</div>`;
-  }
+    estoque = await loadEstoqueBaixo();
+    if (dE) {
+      if (!estoque.length) {
+        dE.innerHTML = `
+          <div class="card-title">Estoque Baixo</div>
+          <div class="card-sub">Itens abaixo do mínimo</div>
+          <div class="small" style="margin-top:10px;">Nenhum item abaixo do mínimo ✅</div>
+          <div style="margin-top:10px;">
+            <a class="btn" href="#estoque">Abrir Estoque</a>
+          </div>
+        `;
+      } else {
+        dE.innerHTML = `
+          <div class="card-title">Estoque Baixo</div>
+          <div class="card-sub">Itens abaixo do mínimo</div>
 
-  // relatório por período
-  const rpAplicar = document.getElementById("rpAplicar");
-  if (rpAplicar) {
-    rpAplicar.addEventListener("click", async () => {
-      const ini = document.getElementById("rpIni")?.value;
-      const fim = document.getElementById("rpFim")?.value;
-      const rpTotal = document.getElementById("rpTotal");
-      const rpQtd = document.getElementById("rpQtd");
+          <div class="table-wrap" style="margin-top:10px;">
+            <table class="table" style="min-width:880px;">
+              <thead>
+                <tr>
+                  <th style="min-width:240px;">Produto</th>
+                  <th style="min-width:120px;">Código</th>
+                  <th style="min-width:140px;">Cor</th>
+                  <th style="min-width:120px;">Tam.</th>
+                  <th style="min-width:100px;">Qtd</th>
+                  <th style="min-width:110px;">Mínimo</th>
+                  <th style="min-width:140px;">Falta</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${estoque
+                  .map((x) => {
+                    const falta = clamp0(Number(x.min - x.qtd).toFixed(0));
+                    return `
+                      <tr>
+                        <td>${escapeHtml(x.produto || "—")}</td>
+                        <td>${escapeHtml(x.codigo || "")}</td>
+                        <td>${escapeHtml(x.cor || "")}</td>
+                        <td>${escapeHtml(x.tamanho || "")}</td>
+                        <td><b>${Number(x.qtd || 0)}</b></td>
+                        <td>${Number(x.min || 0)}</td>
+                        <td><b>${Number(falta)}</b></td>
+                      </tr>
+                    `;
+                  })
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
 
-      if (!ini || !fim) {
-        if (rpQtd) rpQtd.textContent = "Preencha início e fim.";
-        return;
+          <div style="margin-top:10px;">
+            <a class="btn primary" href="#estoque">Abrir Estoque</a>
+          </div>
+        `;
       }
-
-      const { startISO, endISO } = parseDateInputToISOStartEnd(ini, fim);
-
-      if (rpQtd) rpQtd.textContent = "Carregando...";
-      try {
-        const r = await loadVendasPeriodo(startISO, endISO);
-        if (rpTotal) rpTotal.textContent = money(r.total);
-        if (rpQtd) rpQtd.textContent = `${r.qtd} venda(s) no período`;
-      } catch (e) {
-        console.error(e);
-        if (rpTotal) rpTotal.textContent = "—";
-        if (rpQtd) rpQtd.textContent = e?.message || "Erro ao gerar relatório.";
-      }
-    });
+    }
+  } catch (e) {
+    console.error(e);
+    if (dE) {
+      dE.innerHTML = `
+        <div class="card-title">Estoque Baixo</div>
+        <div class="card-sub">Itens abaixo do mínimo</div>
+        <div class="small" style="margin-top:10px;">Erro ao carregar estoque baixo.</div>
+        <div class="small" style="margin-top:8px;">Veja o Console (F12).</div>
+      `;
+    }
   }
+
+  setResumo({ vendas, cred, estoque });
+
+  // Relatório por período (placeholder do botão)
+  const btn = document.getElementById("dAplicar");
+  const msg = document.getElementById("dRelMsg");
+  btn?.addEventListener("click", () => {
+    if (!msg) return;
+    msg.textContent = "Relatório por período: (se você quiser, eu ligo isso na sua tabela de vendas e somo tudo).";
+  });
 }
 
 /* =========================
    EXPORT
 ========================= */
 export async function renderDashboard() {
-  const html = renderDashboardLayout();
+  const html = renderLayout();
 
   setTimeout(() => {
-    bootDashboard().catch((e) => console.error(e));
+    initDashboard().catch((e) => console.error(e));
   }, 0);
 
   return html;
