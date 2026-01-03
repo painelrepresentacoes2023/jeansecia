@@ -1,18 +1,49 @@
 import { sb } from "./supabase.js";
+
 import { renderDashboard } from "./pages/dashboard.js";
 import { renderProdutos } from "./pages/produtos.js";
 import { renderEstoque } from "./pages/estoque.js";
 import { renderCompras } from "./pages/compras.js";
 import { renderVendas } from "./pages/vendas.js";
 import { renderCrediario } from "./pages/crediario.js";
+import { renderFinanceiro } from "./pages/financeiro.js"; // ✅ NOVO
 
 const routes = {
-  dashboard: { title: "Dashboard", crumbs: "Visão geral", render: renderDashboard },
-  produtos:   { title: "Produtos", crumbs: "Cadastro e organização", render: renderProdutos },
-  estoque:    { title: "Estoque", crumbs: "Filtros por categoria, cor e tamanho", render: renderEstoque },
-  compras:    { title: "Compras", crumbs: "Entrada de mercadorias", render: renderCompras },
-  vendas:     { title: "Vendas", crumbs: "Registro e histórico", render: renderVendas },
-  crediario:  { title: "Crediário", crumbs: "Parcelas, alertas e pagamentos", render: renderCrediario },
+  dashboard: {
+    title: "Dashboard",
+    crumbs: "Visão geral",
+    render: renderDashboard,
+  },
+  produtos: {
+    title: "Produtos",
+    crumbs: "Cadastro e organização",
+    render: renderProdutos,
+  },
+  estoque: {
+    title: "Estoque",
+    crumbs: "Filtros por categoria, cor e tamanho",
+    render: renderEstoque,
+  },
+  compras: {
+    title: "Compras",
+    crumbs: "Entrada de mercadorias",
+    render: renderCompras,
+  },
+  vendas: {
+    title: "Vendas",
+    crumbs: "Registro e histórico",
+    render: renderVendas,
+  },
+  crediario: {
+    title: "Crediário",
+    crumbs: "Parcelas, alertas e pagamentos",
+    render: renderCrediario,
+  },
+  financeiro: { // ✅ NOVA ROTA
+    title: "Financeiro",
+    crumbs: "Resumo de receitas, despesas e lucro",
+    render: renderFinanceiro,
+  },
 };
 
 const els = {
@@ -39,12 +70,10 @@ function setActive(route) {
 }
 
 function getRouteFromHash() {
-  const h = (location.hash || "").replace("#", "").trim();
-  return h;
+  return (location.hash || "").replace("#", "").trim();
 }
 
 function setHash(route) {
-  // não fica gerando histórico infinito; só troca o hash
   if (location.hash !== `#${route}`) {
     history.replaceState(null, "", `#${route}`);
   }
@@ -81,7 +110,7 @@ async function go(route, opts = { syncUrl: true, save: true }) {
   els.content.innerHTML = await r.render();
 }
 
-// Clique no menu
+// Clique no menu lateral
 els.navItems.forEach((btn) =>
   btn.addEventListener("click", () => go(btn.dataset.route))
 );
@@ -93,11 +122,11 @@ els.btnLogout.addEventListener("click", async () => {
   location.href = "./login.html";
 });
 
-// Se mudar o hash manualmente (ou voltar/avançar), respeita
+// Mudança manual de hash
 window.addEventListener("hashchange", () => {
   const route = getInitialRoute();
   go(route, { syncUrl: true, save: true });
 });
 
-// Inicial: abre a última página (ou hash) — NÃO força dashboard
+// Inicial
 go(getInitialRoute(), { syncUrl: true, save: true });
