@@ -22,16 +22,6 @@ function clamp0(n) {
   return x < 0 ? 0 : x;
 }
 
-/** YYYY-MM-DD local (sem bug UTC) */
-function todayISO() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
-}
-
-/** formata DATE (YYYY-MM-DD) sem voltar 1 dia */
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const s = String(iso).slice(0, 10);
@@ -44,438 +34,381 @@ function fmtDateBR(iso) {
   return d2.toLocaleDateString("pt-BR");
 }
 
-/* =========================
-   CREDIÁRIO: FORMAS (enum)
-========================= */
-async function loadEnumValues(enumType) {
-  const { data, error } = await sb.rpc("enum_values", { enum_type: enumType });
-  if (error) throw error;
-  return (data || []).map((x) => x.value);
-}
-
-async function loadCrediFormas() {
-  let vals = [];
-  try {
-    vals = await loadEnumValues("forma_pagamento");
-  } catch {
-    vals = [];
+function pick(obj, keys, fallback = "") {
+  for (const k of keys) {
+    if (obj && obj[k] != null && String(obj[k]).trim() !== "") return obj[k];
   }
-  const filtered = (vals || []).filter((v) => String(v).toLowerCase().includes("credi"));
-  if (!filtered.length) return ["crediario", "crediário", "credi"];
-  return filtered;
+  return fallback;
+}
+
+function pickNum(obj, keys, fallback = 0) {
+  for (const k of keys) {
+    const v = Number(obj?.[k]);
+    if (Number.isFinite(v)) return v;
+  }
+  return fallback;
 }
 
 /* =========================
-   QUERIES
+   DASHBOARD: VENDAS HOJE
 ========================= */
 async function fetchVendasHoje() {
-  const t = todayISO();
+  // pega "hoje" no fuso local (Brasil)
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const start = `${yyyy}-${mm}-${dd}T00:00:00`;
+  const end = `${yyyy}-${mm}-${dd}T23:59:59`;
 
-  // pega vendas do dia (comparando só a data yyyy-mm-dd)
   const { data, error } = await sb
     .from("vendas")
-    .select("id,total,data")
-    .gte("data", `${t}T00:00:00`)
-    .lte("data", `${t}T23:59:59`)
-    .limit(500);
+    .select("id,total,data,created_at")
+    .gte("data", start)
+    .lte("data", end)
+    .order("data", { ascending: false });
 
   if (error) throw error;
 
   const rows = data || [];
   const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
-  return { count: rows.length, total: Number(total.toFixed(2)) };
+  return { total, count: rows.length };
 }
 
-async function fetchRelatorioPeriodo(inicioISO, fimISO) {
-  // intervalo inclusive (fim até 23:59:59)
-  const { data, error } = await sb
-    .from("vendas")
-    .select("id,total,data")
-    .gte("data", `${inicioISO}T00:00:00`)
-    .lte("data", `${fimISO}T23:59:59`)
-    .limit(2000);
-
-  if (error) throw error;
-
-  const rows = data || [];
-  const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
-  return { count: rows.length, total: Number(total.toFixed(2)) };
-}
-
-/**
- * ✅ Crediário no dashboard:
- * - abertoTotal = soma dos saldos das parcelas NÃO pagas (valor - valor_pago_acumulado)
- * - proximaParcela = menor vencimento entre as NÃO pagas, junto com cliente/telefone
- *
- * Observação: isso depende do relacionamento parcelas(venda_id) -> vendas(id)
- */
-async function fetchCrediarioDashboard() {
-  const crediFormas = await loadCrediFormas();
-
-  // puxa parcelas ainda abertas e já traz dados da venda (cliente/telefone/forma)
+/* =========================
+   DASHBOARD: CREDIÁRIO (PRÓXIMA PARCELA)
+   (mantém do jeito que já tá funcionando)
+========================= */
+async function fetchCrediarioProximaParcela() {
+  // busca parcelas abertas (status != paga) e pega a mais próxima de vencer
   const { data, error } = await sb
     .from("parcelas")
-    .select(
-      "id,venda_id,numero,vencimento,valor,valor_pago_acumulado,status,vendas(cliente_nome,cliente_telefone,forma)"
-    )
+    .select("id,venda_id,numero,vencimento,valor,status,valor_pago_acumulado")
     .order("vencimento", { ascending: true })
     .limit(2000);
 
   if (error) throw error;
 
-  const rows = (data || []).filter((p) => {
+  const abertas = (data || []).filter((p) => {
     const st = String(p.status || "").toLowerCase();
-    const venda = p.vendas || {};
-    const forma = String(venda.forma || "").toLowerCase();
-
-    const ehCred = crediFormas.map((x) => String(x).toLowerCase()).includes(forma);
-    const naoPaga = !st.includes("pag"); // paga/pago
-    return ehCred && naoPaga;
-  });
-
-  let abertoTotal = 0;
-  for (const p of rows) {
     const valor = Number(p.valor || 0);
     const pago = Number(p.valor_pago_acumulado || 0);
-    abertoTotal += clamp0(valor - pago);
-  }
-  abertoTotal = Number(abertoTotal.toFixed(2));
+    const saldo = Number((valor - pago).toFixed(2));
+    return !st.includes("pag") && saldo > 0.009;
+  });
 
-  const proximaParcela = rows.length ? rows[0] : null;
+  if (!abertas.length) return { abertoTotal: 0, prox: null };
 
-  return { abertoTotal, proximaParcela };
+  // total aberto somando saldos das parcelas
+  const abertoTotal = abertas.reduce((acc, p) => {
+    const valor = Number(p.valor || 0);
+    const pago = Number(p.valor_pago_acumulado || 0);
+    return acc + clamp0(valor - pago);
+  }, 0);
+
+  const proxParc = abertas[0];
+
+  // pega dados da venda pra mostrar cliente
+  const { data: vData, error: vErr } = await sb
+    .from("vendas")
+    .select("id,cliente_nome,cliente_telefone")
+    .eq("id", proxParc.venda_id)
+    .maybeSingle();
+
+  // se falhar venda, só ignora e mostra sem nome
+  const cliente_nome = vErr ? "" : (vData?.cliente_nome || "");
+  const cliente_telefone = vErr ? "" : (vData?.cliente_telefone || "");
+
+  return {
+    abertoTotal: Number(abertoTotal.toFixed(2)),
+    prox: {
+      cliente_nome,
+      cliente_telefone,
+      vencimento: proxParc.vencimento,
+      numero: proxParc.numero,
+      saldo: clamp0(Number(proxParc.valor || 0) - Number(proxParc.valor_pago_acumulado || 0)),
+    },
+  };
 }
-
-/**
- * ✅ Estoque Baixo:
- * Puxa da SUA tabela "estoque" e colunas que aparecem na página Estoque:
- * categoria, produto, codigo, cor, tamanho, qtd, minimo
- */
-async function fetchEstoqueBaixo() {
-  // tenta 1: com categoria (se existir)
-  const try1 = await sb
-    .from("estoque")
-    .select("categoria,produto,codigo,cor,tamanho,qtd,minimo")
-    .order("produto", { ascending: true })
-    .limit(3000);
-
-  if (!try1.error) {
-    const rows = (try1.data || []).map((r) => ({
-      categoria: r.categoria ?? "",
-      produto: r.produto ?? "",
-      codigo: r.codigo ?? "",
-      cor: r.cor ?? "",
-      tamanho: r.tamanho ?? "",
-      qtd: Number(r.qtd || 0),
-      minimo: Number(r.minimo || 0),
-    }));
-
-    return rows
-      .filter((r) => Number.isFinite(r.minimo) && r.minimo > 0 && r.qtd < r.minimo)
-      .map((r) => ({ ...r, falta: clamp0(r.minimo - r.qtd) }));
-  }
-
-  // fallback 2: sem categoria (quando dá "column estoque.categoria does not exist")
-  const try2 = await sb
-    .from("estoque")
-    .select("produto,codigo,cor,tamanho,qtd,minimo")
-    .order("produto", { ascending: true })
-    .limit(3000);
-
-  if (try2.error) throw try2.error;
-
-  const rows2 = (try2.data || []).map((r) => ({
-    categoria: "", // não existe na tabela, então fica vazio
-    produto: r.produto ?? "",
-    codigo: r.codigo ?? "",
-    cor: r.cor ?? "",
-    tamanho: r.tamanho ?? "",
-    qtd: Number(r.qtd || 0),
-    minimo: Number(r.minimo || 0),
-  }));
-
-  return rows2
-    .filter((r) => Number.isFinite(r.minimo) && r.minimo > 0 && r.qtd < r.minimo)
-    .map((r) => ({ ...r, falta: clamp0(r.minimo - r.qtd) }));
-}
-
 
 /* =========================
-   UI (HTML)
+   DASHBOARD: ESTOQUE BAIXO (SIMPLES)
+   - tenta várias tabelas/views
+   - tenta vários nomes de colunas
+   - filtra qtd < minimo
 ========================= */
-function layout() {
-  // datas padrão (últimos 7 dias)
-  const fim = todayISO();
-  const d = new Date();
-  d.setDate(d.getDate() - 7);
-  const inicio = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
+async function fetchEstoqueBaixo() {
+  const sources = ["estoque", "vw_estoque", "estoque_view", "view_estoque", "estoque_itens"];
 
-  return `
-    <style>
-      .dashTableWrap{ overflow:auto; max-width:100%; -webkit-overflow-scrolling:touch; }
-      .dashTable{ width:100%; min-width:860px; border-collapse:collapse; }
-      .muted{ opacity:.85; }
-      .big{ font-size:1.35rem; font-weight:900; margin-top:6px; }
-      .rowBetween{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-      .pill{
-        display:inline-flex; align-items:center; gap:8px;
-        padding:6px 10px; border-radius:999px;
-        border:1px solid rgba(255,255,255,.10);
-        background: rgba(255,255,255,.03);
-        font-size:.85rem;
+  // tentativa de select "wide": se a fonte não tiver uma coluna, o PostgREST pode errar.
+  // então fazemos fallback pra select menor por tentativa.
+  const selectWide = "categoria,produto,codigo,cor,tamanho,qtd,minimo,quantidade,estoque_minimo,min";
+
+  let lastError = null;
+
+  for (const src of sources) {
+    // 1) tenta wide
+    let res = await sb.from(src).select(selectWide).limit(3000);
+    if (res.error) {
+      lastError = res.error;
+
+      // 2) fallback: select mínimo (quase todo mundo tem algum desses)
+      res = await sb.from(src).select("*").limit(3000);
+      if (res.error) {
+        lastError = res.error;
+        continue;
       }
-      .ok{ color:#7CFFB2; }
-      .bad{ color:#FF8A8A; }
-    </style>
+    }
 
-    <div class="grid cols-2">
-      <div class="card" id="cardVendasHoje">
+    const data = res.data || [];
+    const rows = data.map((r) => {
+      const produto = pick(r, ["produto", "nome", "descricao", "produto_nome"], "");
+      const codigo = pick(r, ["codigo", "cod", "sku"], "");
+      const cor = pick(r, ["cor", "cor_nome"], "");
+      const tamanho = pick(r, ["tamanho", "tam", "grade"], "");
+      const categoria = pick(r, ["categoria", "cat", "categoria_nome"], "");
+
+      const qtd = pickNum(r, ["qtd", "quantidade", "estoque", "saldo", "qtd_atual"], 0);
+      const minimo = pickNum(r, ["minimo", "estoque_minimo", "min", "qtd_minima", "minimo_estoque"], 0);
+
+      return { produto, codigo, cor, tamanho, categoria, qtd, minimo };
+    });
+
+    const baixos = rows
+      .filter((r) => Number.isFinite(r.minimo) && r.minimo > 0 && Number.isFinite(r.qtd) && r.qtd < r.minimo)
+      .map((r) => ({ ...r, falta: clamp0(r.minimo - r.qtd) }))
+      .sort((a, b) => b.falta - a.falta);
+
+    return { source: src, baixos };
+  }
+
+  // se nada deu certo:
+  throw lastError || new Error("Não consegui ler o estoque em nenhuma tabela/view.");
+}
+
+/* =========================
+   RENDER
+========================= */
+function renderSkeleton() {
+  return `
+    <div class="grid cols-1" style="gap:14px;">
+      <div class="card">
         <div class="card-title">Vendas Hoje</div>
         <div class="card-sub">Resumo do dia</div>
-        <div class="small muted" id="vhMsg">Carregando...</div>
+        <div class="small" id="dVendasHoje">Carregando...</div>
       </div>
 
-      <div class="card" id="cardCrediarioDash">
+      <div class="card">
         <div class="card-title">Crediário</div>
         <div class="card-sub">Aberto e próxima parcela</div>
-        <div class="small muted" id="crMsg">Carregando...</div>
+        <div class="small" id="dCred">Carregando...</div>
       </div>
-    </div>
 
-    <div class="card" style="margin-top:14px;" id="cardEstoqueBaixo">
-      <div class="rowBetween">
-        <div>
-          <div class="card-title">Estoque Baixo</div>
-          <div class="card-sub">Itens abaixo do mínimo</div>
+      <div class="card">
+        <div class="card-title">Estoque Baixo</div>
+        <div class="card-sub">Itens abaixo do mínimo</div>
+        <div class="small" id="dEstoqueMsg">Carregando...</div>
+
+        <div class="table-wrap" style="margin-top:10px; overflow:auto; max-width:100%; -webkit-overflow-scrolling:touch;">
+          <table class="table" style="min-width:900px; width:100%;">
+            <thead>
+              <tr>
+                <th style="min-width:220px;">Produto</th>
+                <th style="min-width:120px;">Código</th>
+                <th style="min-width:120px;">Cor</th>
+                <th style="min-width:120px;">Tam.</th>
+                <th style="min-width:90px;">Qtd</th>
+                <th style="min-width:90px;">Mínimo</th>
+                <th style="min-width:90px;">Falta</th>
+              </tr>
+            </thead>
+            <tbody id="dEstoqueTbody">
+              <tr><td colspan="7" class="small">Carregando...</td></tr>
+            </tbody>
+          </table>
         </div>
-        <button class="btn" id="btnAbrirEstoque">Abrir Estoque</button>
+
+        <div style="margin-top:10px;">
+          <button class="btn" id="btnAbrirEstoque">Abrir Estoque</button>
+        </div>
       </div>
 
-      <div class="small muted" id="ebMsg" style="margin-top:10px;">Carregando...</div>
-
-      <div class="dashTableWrap" style="margin-top:10px;">
-        <table class="dashTable">
-          <thead>
-            <tr>
-              <th style="min-width:220px;">Produto</th>
-              <th style="min-width:110px;">Código</th>
-              <th style="min-width:110px;">Cor</th>
-              <th style="min-width:90px;">Tam.</th>
-              <th style="min-width:90px;">Qtd</th>
-              <th style="min-width:110px;">Mínimo</th>
-              <th style="min-width:110px;">Falta</th>
-            </tr>
-          </thead>
-          <tbody id="ebTbody">
-            <tr><td colspan="7" class="small">Carregando...</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="grid cols-2" style="margin-top:14px;">
-      <div class="card" id="cardRelatorio">
+      <div class="card">
         <div class="card-title">Relatório por período</div>
         <div class="card-sub">Filtro de datas</div>
 
         <div class="grid" style="grid-template-columns: 1fr 1fr auto; gap:10px; margin-top:12px; align-items:end;">
           <div class="field">
             <label>Início</label>
-            <input class="input" type="date" id="rpInicio" value="${inicio}" />
+            <input class="input" id="repIni" type="date" />
           </div>
           <div class="field">
             <label>Fim</label>
-            <input class="input" type="date" id="rpFim" value="${fim}" />
+            <input class="input" id="repFim" type="date" />
           </div>
-          <button class="btn primary" id="rpAplicar">Aplicar</button>
+          <button class="btn primary" id="btnRep">Aplicar</button>
         </div>
 
-        <div class="small muted" id="rpMsg" style="margin-top:10px;">Selecione um período.</div>
-      </div>
-
-      <div class="card" id="cardResumo">
-        <div class="card-title">Resumo rápido</div>
-        <div class="card-sub">Visão geral</div>
-        <div class="small muted" id="rsMsg" style="margin-top:10px;">Carregando...</div>
+        <div class="small" id="repOut" style="margin-top:10px;">Selecione um período.</div>
       </div>
     </div>
   `;
 }
 
-/* =========================
-   RENDERERS
-========================= */
-function renderVendasHoje({ count, total }) {
-  const el = document.getElementById("vhMsg");
-  if (!el) return;
-  el.innerHTML = `
-    <div class="big">${money(total)}</div>
-    <div class="small muted">${count} venda(s) hoje</div>
-  `;
-}
-
-function renderCrediario({ abertoTotal, proximaParcela }) {
-  const el = document.getElementById("crMsg");
+async function renderVendasHoje() {
+  const el = document.getElementById("dVendasHoje");
   if (!el) return;
 
-  const btn = `<button class="btn primary" id="btnAbrirCrediario" style="margin-top:10px;">Abrir no Crediário</button>`;
-
-  if (!proximaParcela) {
+  try {
+    const { total, count } = await fetchVendasHoje();
     el.innerHTML = `
-      <div class="big">Aberto: ${money(abertoTotal)}</div>
-      <div class="small muted">Nenhuma parcela em aberto agora ✅</div>
-      ${btn}
+      <div style="font-size:1.15rem; font-weight:900;">${money(total)}</div>
+      <div class="small">${count} venda(s) hoje</div>
     `;
-    return;
+  } catch (e) {
+    console.error(e);
+    el.textContent = "Erro ao carregar vendas de hoje.";
   }
-
-  const venda = proximaParcela.vendas || {};
-  const cliente = venda.cliente_nome || "—";
-  const tel = venda.cliente_telefone || "";
-  const venc = fmtDateBR(proximaParcela.vencimento);
-  const numero = Number(proximaParcela.numero || 0);
-
-  const valor = Number(proximaParcela.valor || 0);
-  const pago = Number(proximaParcela.valor_pago_acumulado || 0);
-  const saldo = clamp0(valor - pago);
-
-  el.innerHTML = `
-    <div class="big">Aberto: ${money(abertoTotal)}</div>
-
-    <div class="card" style="margin-top:12px;">
-      <div style="font-weight:800;">Próxima parcela</div>
-      <div class="small">${escapeHtml(cliente)}${tel ? ` • ${escapeHtml(tel)}` : ""}</div>
-      <div class="small">Venc: <b>${venc}</b> • Nº <b>${numero}</b></div>
-      <div class="small" style="margin-top:6px;">
-        Saldo: <b>${money(saldo)}</b>
-      </div>
-    </div>
-
-    ${btn}
-  `;
 }
 
-function renderEstoqueBaixo(rows) {
-  const msg = document.getElementById("ebMsg");
-  const tbody = document.getElementById("ebTbody");
+async function renderCrediario() {
+  const el = document.getElementById("dCred");
+  if (!el) return;
+
+  try {
+    const { abertoTotal, prox } = await fetchCrediarioProximaParcela();
+
+    if (!prox) {
+      el.innerHTML = `
+        <div style="font-size:1.1rem; font-weight:900;">Aberto: ${money(abertoTotal)}</div>
+        <div class="small">Nenhuma parcela aberta ✅</div>
+        <div style="margin-top:10px;">
+          <button class="btn" id="btnAbrirCred">Abrir no Crediário</button>
+        </div>
+      `;
+    } else {
+      el.innerHTML = `
+        <div style="font-size:1.1rem; font-weight:900;">Aberto: ${money(abertoTotal)}</div>
+        <div class="card" style="margin-top:10px;">
+          <div style="font-weight:800;">Próxima parcela</div>
+          <div class="small">${escapeHtml(prox.cliente_nome || "-")} • ${escapeHtml(prox.cliente_telefone || "")}</div>
+          <div class="small">Venc: <b>${fmtDateBR(prox.vencimento)}</b> • Nº <b>${Number(prox.numero || 0)}</b></div>
+          <div class="small">Saldo: <b>${money(prox.saldo)}</b></div>
+        </div>
+        <div style="margin-top:10px;">
+          <button class="btn" id="btnAbrirCred">Abrir no Crediário</button>
+        </div>
+      `;
+    }
+
+    const btn = document.getElementById("btnAbrirCred");
+    if (btn) btn.onclick = () => (location.hash = "#crediario");
+  } catch (e) {
+    console.error(e);
+    el.textContent = "Erro ao carregar crediário.";
+  }
+}
+
+async function renderEstoqueBaixo() {
+  const msg = document.getElementById("dEstoqueMsg");
+  const tbody = document.getElementById("dEstoqueTbody");
+  const btn = document.getElementById("btnAbrirEstoque");
+
+  if (btn) btn.onclick = () => (location.hash = "#estoque");
+
   if (!msg || !tbody) return;
 
-  if (!rows.length) {
-    msg.innerHTML = `<span class="pill ok">Nenhum item abaixo do mínimo ✅</span>`;
-    tbody.innerHTML = `<tr><td colspan="7" class="small">Tudo certo no estoque.</td></tr>`;
-    return;
-  }
+  try {
+    const { baixos } = await fetchEstoqueBaixo();
 
-  msg.innerHTML = `<span class="pill bad">${rows.length} item(ns) abaixo do mínimo ⚠️</span>`;
-
-  tbody.innerHTML = rows
-    .slice(0, 12)
-    .map((r) => {
-      return `
-        <tr>
-          <td>${escapeHtml(r.produto || r.nome || r.descricao || "—")}</td>
-          <td>${escapeHtml(r.codigo || "—")}</td>
-          <td>${escapeHtml(r.cor || "—")}</td>
-          <td>${escapeHtml(r.tamanho || "—")}</td>
-          <td>${Number(r.qtd || 0)}</td>
-          <td>${Number(r.minimo || 0)}</td>
-          <td><b>${Number(r.falta || 0)}</b></td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
-function renderResumo({ vendasHoje, crediario, estoqueLowCount }) {
-  const el = document.getElementById("rsMsg");
-  if (!el) return;
-
-  const prox = crediario.proximaParcela
-    ? fmtDateBR(crediario.proximaParcela.vencimento)
-    : "—";
-
-  el.innerHTML = `
-    <div class="small">• Vendas hoje: <b>${money(vendasHoje.total)}</b> (${vendasHoje.count} venda(s))</div>
-    <div class="small">• Crediário aberto: <b>${money(crediario.abertoTotal)}</b></div>
-    <div class="small">• Próximo venc.: <b>${prox}</b></div>
-    <div class="small">• Estoque baixo: <b>${estoqueLowCount}</b> item(ns)</div>
-  `;
-}
-
-/* =========================
-   BINDINGS
-========================= */
-function bindDashButtons() {
-  const btnEst = document.getElementById("btnAbrirEstoque");
-  btnEst?.addEventListener("click", () => {
-    location.hash = "#estoque";
-  });
-
-  // botão do crediário é criado dentro do renderCrediario (depois)
-  document.addEventListener("click", (ev) => {
-    const t = ev.target;
-    if (t && t.id === "btnAbrirCrediario") location.hash = "#crediario";
-  });
-
-  const rpBtn = document.getElementById("rpAplicar");
-  rpBtn?.addEventListener("click", async () => {
-    const ini = document.getElementById("rpInicio")?.value;
-    const fim = document.getElementById("rpFim")?.value;
-    const rpMsg = document.getElementById("rpMsg");
-    if (!ini || !fim) {
-      if (rpMsg) rpMsg.textContent = "Preencha início e fim.";
+    if (!baixos.length) {
+      msg.innerHTML = `Nenhum item abaixo do mínimo ✅`;
+      tbody.innerHTML = `<tr><td colspan="7" class="small">—</td></tr>`;
       return;
     }
 
-    if (rpMsg) rpMsg.textContent = "Carregando...";
+    msg.innerHTML = `<b>${baixos.length}</b> item(ns) abaixo do mínimo`;
+
+    tbody.innerHTML = baixos
+      .slice(0, 20)
+      .map((r) => {
+        return `
+          <tr>
+            <td>${escapeHtml(r.produto || "—")}</td>
+            <td>${escapeHtml(r.codigo || "—")}</td>
+            <td>${escapeHtml(r.cor || "—")}</td>
+            <td>${escapeHtml(r.tamanho || "—")}</td>
+            <td>${Number(r.qtd || 0)}</td>
+            <td>${Number(r.minimo || 0)}</td>
+            <td><b>${Number(r.falta || 0)}</b></td>
+          </tr>
+        `;
+      })
+      .join("");
+  } catch (e) {
+    console.error(e);
+    msg.textContent = "Erro ao carregar estoque baixo.";
+    tbody.innerHTML = `<tr><td colspan="7" class="small">Erro.</td></tr>`;
+  }
+}
+
+function bindRelatorioPeriodo() {
+  const ini = document.getElementById("repIni");
+  const fim = document.getElementById("repFim");
+  const out = document.getElementById("repOut");
+  const btn = document.getElementById("btnRep");
+  if (!ini || !fim || !out || !btn) return;
+
+  // default: últimos 7 dias
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const start = new Date(end);
+  start.setDate(start.getDate() - 7);
+
+  const toISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  ini.value = toISO(start);
+  fim.value = toISO(end);
+
+  btn.onclick = async () => {
+    const a = ini.value;
+    const b = fim.value;
+    if (!a || !b) return (out.textContent = "Selecione um período válido.");
+
+    out.textContent = "Carregando...";
+
     try {
-      const r = await fetchRelatorioPeriodo(ini, fim);
-      if (rpMsg) {
-        rpMsg.innerHTML = `Total: <b>${money(r.total)}</b> • <b>${r.count}</b> venda(s) no período.`;
-      }
+      const { data, error } = await sb
+        .from("vendas")
+        .select("id,total,data")
+        .gte("data", `${a}T00:00:00`)
+        .lte("data", `${b}T23:59:59`)
+        .limit(5000);
+
+      if (error) throw error;
+
+      const rows = data || [];
+      const total = rows.reduce((acc, r) => acc + Number(r.total || 0), 0);
+
+      out.innerHTML = `
+        <div>Total no período: <b>${money(total)}</b></div>
+        <div class="small">${rows.length} venda(s)</div>
+      `;
     } catch (e) {
       console.error(e);
-      if (rpMsg) rpMsg.textContent = e?.message || "Erro ao gerar relatório.";
+      out.textContent = "Erro ao gerar relatório.";
     }
-  });
+  };
 }
 
 /* =========================
    EXPORT
 ========================= */
 export async function renderDashboard() {
-  const html = layout();
+  const html = renderSkeleton();
 
   setTimeout(async () => {
-    try {
-      bindDashButtons();
-
-      // 1) vendas hoje
-      const vendasHoje = await fetchVendasHoje();
-      renderVendasHoje(vendasHoje);
-
-      // 2) crediário
-      const crediario = await fetchCrediarioDashboard();
-      renderCrediario(crediario);
-
-      // 3) estoque baixo
-      const low = await fetchEstoqueBaixo();
-      renderEstoqueBaixo(low);
-
-      // 4) resumo
-      renderResumo({
-        vendasHoje,
-        crediario,
-        estoqueLowCount: low.length,
-      });
-    } catch (e) {
-      console.error(e);
-      // fallback mínimo sem quebrar a página
-      const rs = document.getElementById("rsMsg");
-      if (rs) rs.textContent = e?.message || "Erro ao carregar dashboard.";
-    }
+    await Promise.allSettled([renderVendasHoje(), renderCrediario(), renderEstoqueBaixo()]);
+    bindRelatorioPeriodo();
   }, 0);
 
   return html;
