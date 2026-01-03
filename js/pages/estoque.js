@@ -70,13 +70,13 @@ async function loadTamanhosByCategoria(categoriaId) {
   return (data || []).map(x => x.tamanho);
 }
 
-async function loadEstoque(filters) {
+async function loadEstoque(filters = {}) {
   // Usa a VIEW vw_estoque_detalhado
-  let q = sb.from("vw_estoque_detalhado")
-  .select("*")
-  
+  let q = sb
+    .from("vw_estoque_detalhado")
+    .select("*");
 
-
+  // filtros (com segurança)
   if (filters.categoria_id) q = q.eq("categoria_id", filters.categoria_id);
   if (filters.produto_id) q = q.eq("produto_id", filters.produto_id);
   if (filters.cor) q = q.ilike("cor", `%${filters.cor}%`);
@@ -93,8 +93,28 @@ async function loadEstoque(filters) {
     .order("tamanho", { ascending: true });
 
   if (error) throw error;
-  return data || [];
+
+  // ✅ NORMALIZA: estoque nulo vira 0, e flags também
+  return (data || []).map((r) => {
+    const estoque =
+      Number(
+        r.estoque ??
+        r.saldo ??
+        r.qtd ??
+        r.quantidade ??
+        0
+      ) || 0;
+
+    return {
+      ...r,
+      estoque, // garante um campo consistente pra UI
+      estoque_baixo: !!r.estoque_baixo,
+      produto_ativo: !!r.produto_ativo,
+      variacao_ativa: !!r.variacao_ativa,
+    };
+  });
 }
+
 
 export async function renderEstoque() {
   // Render inicial
