@@ -152,16 +152,40 @@ async function fetchCrediarioDashboard() {
  * categoria, produto, codigo, cor, tamanho, qtd, minimo
  */
 async function fetchEstoqueBaixo() {
-  const { data, error } = await sb
+  // tenta 1: com categoria (se existir)
+  const try1 = await sb
     .from("estoque")
     .select("categoria,produto,codigo,cor,tamanho,qtd,minimo")
     .order("produto", { ascending: true })
     .limit(3000);
 
-  if (error) throw error;
+  if (!try1.error) {
+    const rows = (try1.data || []).map((r) => ({
+      categoria: r.categoria ?? "",
+      produto: r.produto ?? "",
+      codigo: r.codigo ?? "",
+      cor: r.cor ?? "",
+      tamanho: r.tamanho ?? "",
+      qtd: Number(r.qtd || 0),
+      minimo: Number(r.minimo || 0),
+    }));
 
-  const rows = (data || []).map((r) => ({
-    categoria: r.categoria ?? "",
+    return rows
+      .filter((r) => Number.isFinite(r.minimo) && r.minimo > 0 && r.qtd < r.minimo)
+      .map((r) => ({ ...r, falta: clamp0(r.minimo - r.qtd) }));
+  }
+
+  // fallback 2: sem categoria (quando dá "column estoque.categoria does not exist")
+  const try2 = await sb
+    .from("estoque")
+    .select("produto,codigo,cor,tamanho,qtd,minimo")
+    .order("produto", { ascending: true })
+    .limit(3000);
+
+  if (try2.error) throw try2.error;
+
+  const rows2 = (try2.data || []).map((r) => ({
+    categoria: "", // não existe na tabela, então fica vazio
     produto: r.produto ?? "",
     codigo: r.codigo ?? "",
     cor: r.cor ?? "",
@@ -170,16 +194,11 @@ async function fetchEstoqueBaixo() {
     minimo: Number(r.minimo || 0),
   }));
 
-  // somente abaixo do mínimo
-  const low = rows
+  return rows2
     .filter((r) => Number.isFinite(r.minimo) && r.minimo > 0 && r.qtd < r.minimo)
-    .map((r) => ({
-      ...r,
-      falta: clamp0(r.minimo - r.qtd),
-    }));
-
-  return low;
+    .map((r) => ({ ...r, falta: clamp0(r.minimo - r.qtd) }));
 }
+
 
 /* =========================
    UI (HTML)
@@ -356,7 +375,7 @@ function renderEstoqueBaixo(rows) {
     .map((r) => {
       return `
         <tr>
-          <td>${escapeHtml(r.produto || "—")}</td>
+          <td>${escapeHtml(r.produto || r.nome || r.descricao || "—")}</td>
           <td>${escapeHtml(r.codigo || "—")}</td>
           <td>${escapeHtml(r.cor || "—")}</td>
           <td>${escapeHtml(r.tamanho || "—")}</td>
