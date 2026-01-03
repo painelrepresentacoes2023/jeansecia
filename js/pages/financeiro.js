@@ -42,44 +42,21 @@ async function somarVendas(inicio, fim) {
  * O correto é somar o total calculado (view) ou o total vindo dos itens.
  */
 async function somarCompras(inicio, fim) {
-  // 1) tenta pela VIEW (recomendado)
-  try {
-    const { data, error } = await sb
-      .from("vw_compra_resumo")
-      .select("*")
-      .gte("data", inicio)
-      .lte("data", fim)
-      .limit(10000);
-
-    if (error) throw error;
-
-    // tenta achar o campo total em alguns nomes comuns
-    const soma = (data || []).reduce((s, r) => {
-      const v =
-        r.total ??
-        r.total_compra ??
-        r.valor_total ??
-        0;
-      return s + Number(v || 0);
-    }, 0);
-
-    return soma;
-  } catch (e) {
-    console.warn("VIEW vw_compra_resumo falhou, tentando compras.total (provavelmente vai dar 0).", e);
-  }
-
-  // 2) fallback (vai dar 0 no seu caso enquanto compras.total estiver 0.00)
   const { data, error } = await sb
-    .from("compras")
-    .select("total, data")
+    .from("vw_compra_resumo")
+    .select("total_item, data")
     .gte("data", inicio)
     .lte("data", fim)
     .limit(10000);
 
   if (error) throw error;
 
-  return (data || []).reduce((s, r) => s + Number(r.total || 0), 0);
+  return (data || []).reduce(
+    (s, r) => s + Number(r.total_item || 0),
+    0
+  );
 }
+
 
 /* =========================
    UI
