@@ -71,12 +71,10 @@ async function loadTamanhosByCategoria(categoriaId) {
 }
 
 async function loadEstoque(filters = {}) {
-  // Usa a VIEW vw_estoque_detalhado
   let q = sb
     .from("vw_estoque_detalhado")
     .select("*");
 
-  // filtros (com segurança)
   if (filters.categoria_id) q = q.eq("categoria_id", filters.categoria_id);
   if (filters.produto_id) q = q.eq("produto_id", filters.produto_id);
   if (filters.cor) q = q.ilike("cor", `%${filters.cor}%`);
@@ -94,23 +92,36 @@ async function loadEstoque(filters = {}) {
 
   if (error) throw error;
 
-  // ✅ NORMALIZA: estoque nulo vira 0, e flags também
+  // ✅ NORMALIZA tudo que a UI usa (QTD e MÍNIMO nunca ficam null)
   return (data || []).map((r) => {
-    const estoque =
+    const qtd =
       Number(
+        r.qtd ??
         r.estoque ??
         r.saldo ??
-        r.qtd ??
         r.quantidade ??
         0
       ) || 0;
 
+    const minimo =
+      Number(
+        r.minimo ??
+        r.estoque_minimo ??
+        r.min_qtd ??
+        0
+      ) || 0;
+
+    // se a view já manda estoque_baixo, respeita; senão calcula
+    const estoque_baixo =
+      typeof r.estoque_baixo === "boolean"
+        ? r.estoque_baixo
+        : (minimo > 0 ? qtd <= minimo : false);
+
     return {
       ...r,
-      estoque, // garante um campo consistente pra UI
-      estoque_baixo: !!r.estoque_baixo,
-      produto_ativo: !!r.produto_ativo,
-      variacao_ativa: !!r.variacao_ativa,
+      qtd,
+      minimo,
+      estoque_baixo,
     };
   });
 }
