@@ -6,7 +6,7 @@ import { sb } from "../supabase.js";
 function showToast(msg, type = "info") {
   console.log(`[${type}] ${msg}`);
   const el = document.getElementById("vMsg");
-  if (el) el.textContent = msg;
+  if (el) el.textContent = msg || "";
 }
 
 /* =========================
@@ -195,11 +195,8 @@ async function loadEstoquePorVariacoes(variacaoIds = []) {
 
 /* =========================
    IMPORTANTE (DUPLICAÇÃO DO ESTOQUE)
-   Você tem trigger no banco (t_venda_itens_estoque) que dá baixa/devolve estoque
-   no INSERT/UPDATE/DELETE de venda_itens.
-
+   ✅ Trigger do banco (t_venda_itens_estoque) dá baixa/devolve.
    ✅ Então NÃO ajustamos estoque no JS.
-   Se ajustar no JS + trigger, cai 2x (exatamente seu bug: vende 10, baixa 20).
 ========================= */
 
 /* =========================
@@ -242,42 +239,41 @@ function renderVendasLayout() {
         </div>
 
         <div class="grid grid-2" style="margin-top:12px; gap:10px;">
-  <div class="field">
-    <label>Data/Hora</label>
-    <input class="input" id="vData" type="datetime-local" />
-  </div>
+          <div class="field">
+            <label>Data/Hora</label>
+            <input class="input" id="vData" type="datetime-local" />
+          </div>
 
-  <div class="field">
-    <label>Forma</label>
-    <select class="select" id="vForma"></select>
-  </div>
-</div>
+          <div class="field">
+            <label>Forma</label>
+            <select class="select" id="vForma"></select>
+          </div>
+        </div>
 
-<!-- campos extras só pro crediário -->
-<div id="boxCrediario" style="display:none; margin-top:10px;">
-  <div class="grid grid-2" style="gap:10px;">
-    <div class="field">
-      <label>Parcelas</label>
-      <select class="select" id="vParcelas">
-        ${Array.from({ length: 24 }, (_, i) => i + 1)
-          .map(n => `<option value="${n}">${n}x</option>`)
-          .join("")}
-      </select>
-      <div class="small" id="vParcelaInfo" style="margin-top:6px;"></div>
-    </div>
+        <!-- campos extras só pro crediário -->
+        <div id="boxCrediario" style="display:none; margin-top:10px;">
+          <div class="grid grid-2" style="gap:10px;">
+            <div class="field">
+              <label>Parcelas</label>
+              <select class="select" id="vParcelas">
+                ${Array.from({ length: 24 }, (_, i) => i + 1)
+                  .map((n) => `<option value="${n}">${n}x</option>`)
+                  .join("")}
+              </select>
+              <div class="small" id="vParcelaInfo" style="margin-top:6px;"></div>
+            </div>
 
-    <div class="field">
-      <label>Dia do vencimento</label>
-      <select class="select" id="vDiaVenc">
-        ${Array.from({ length: 28 }, (_, i) => i + 1)
-          .map(n => `<option value="${n}" ${n === 10 ? "selected" : ""}>Dia ${n}</option>`)
-          .join("")}
-      </select>
-      <div class="small" style="margin-top:6px;">Padrão: dia 10</div>
-    </div>
-  </div>
-</div>
-
+            <div class="field">
+              <label>Dia do vencimento</label>
+              <select class="select" id="vDiaVenc">
+                ${Array.from({ length: 28 }, (_, i) => i + 1)
+                  .map((n) => `<option value="${n}" ${n === 10 ? "selected" : ""}>Dia ${n}</option>`)
+                  .join("")}
+              </select>
+              <div class="small" style="margin-top:6px;">Padrão: dia 10</div>
+            </div>
+          </div>
+        </div>
 
         <div class="grid grid-2" style="margin-top:10px; gap:10px;">
           <div class="field">
@@ -535,8 +531,11 @@ function calcResumoVenda() {
 function updateResumoOnly() {
   const { subtotal, desconto, total } = calcResumoVenda();
   const totalPecas = state.itens.reduce((s, it) => s + Number(it.qtd || 0), 0);
-  document.getElementById("vResumo").textContent =
-    `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
+  const el = document.getElementById("vResumo");
+  if (el) {
+    el.textContent =
+      `Peças: ${totalPecas} • Subtotal: ${money(subtotal)} • Desconto: ${money(desconto)} • Total: ${money(total)}`;
+  }
 }
 
 function renderItensVenda() {
@@ -546,6 +545,7 @@ function renderItensVenda() {
     tbody.innerHTML = `<tr><td colspan="7" class="small">Nenhum item ainda.</td></tr>`;
     document.getElementById("btnSalvarVenda").disabled = true;
     document.getElementById("vResumo").textContent = "";
+    updateCrediarioInfo();
     return;
   }
 
@@ -585,6 +585,7 @@ function renderItensVenda() {
       const v = Math.max(1, Number(inp.value || 1));
       state.itens[idx].qtd = v;
       updateResumoOnly();
+      updateCrediarioInfo();
     });
   });
 
@@ -595,6 +596,7 @@ function renderItensVenda() {
       state.itens[idx].preco_unit = Math.max(0, Number(v.toFixed(2)));
       inp.value = String(state.itens[idx].preco_unit).replace(".", ",");
       updateResumoOnly();
+      updateCrediarioInfo();
     });
   });
 
@@ -604,13 +606,18 @@ function renderItensVenda() {
       state.itens.splice(idx, 1);
       renderItensVenda();
       updateResumoOnly();
+      updateCrediarioInfo();
     });
   });
 
   document.getElementById("btnSalvarVenda").disabled = false;
   updateResumoOnly();
+  updateCrediarioInfo();
 }
 
+/* =========================
+   CREDIÁRIO (PASSO 1)
+========================= */
 function isCrediarioForma(forma) {
   return String(forma || "").toLowerCase().includes("credi");
 }
@@ -636,7 +643,6 @@ function updateCrediarioInfo() {
 
   info.textContent = `Parcela estimada: ${money(parcela)}`;
 }
-
 
 /* =========================
    RPC (SALVAR/EDITAR)
@@ -815,6 +821,14 @@ async function editarVenda(vendaId) {
     document.getElementById("vDesconto").value = String(Number(venda.desconto_valor || 0)).replace(".", ",");
     document.getElementById("vObs").value = venda.observacoes || "";
 
+    // Se sua view vw_vendas_resumo já tiver esses campos, tenta preencher:
+    if (document.getElementById("vParcelas") && venda.numero_parcelas != null) {
+      document.getElementById("vParcelas").value = String(Number(venda.numero_parcelas || 1));
+    }
+    if (document.getElementById("vDiaVenc") && venda.dia_vencimento != null) {
+      document.getElementById("vDiaVenc").value = String(Number(venda.dia_vencimento || 10));
+    }
+
     state.itens = (itens || []).map((i) => ({
       variacao_id: normId(i.variacao_id),
       produto_nome: i.produto,
@@ -826,6 +840,7 @@ async function editarVenda(vendaId) {
     }));
 
     renderItensVenda();
+    updateCrediarioInfo();
     showToast("Venda carregada para edição.", "success");
   } catch (e) {
     console.error(e);
@@ -844,6 +859,12 @@ function cancelarEdicaoVenda() {
   document.getElementById("vTelefone").value = "";
   document.getElementById("vDesconto").value = "0,00";
   document.getElementById("vObs").value = "";
+
+  // reset crediário UI
+  if (document.getElementById("vParcelas")) document.getElementById("vParcelas").value = "1";
+  if (document.getElementById("vDiaVenc")) document.getElementById("vDiaVenc").value = "10";
+  updateCrediarioInfo();
+
   showToast("Edição cancelada.", "success");
 }
 
@@ -871,6 +892,11 @@ function iniciarNovaVenda() {
   document.getElementById("vDesconto").value = "0,00";
   document.getElementById("vObs").value = "";
 
+  // defaults crediário
+  if (document.getElementById("vParcelas")) document.getElementById("vParcelas").value = "1";
+  if (document.getElementById("vDiaVenc")) document.getElementById("vDiaVenc").value = "10";
+  updateCrediarioInfo();
+
   showToast("Nova venda iniciada.", "success");
   document.getElementById("vProdSearch")?.focus();
 }
@@ -894,20 +920,18 @@ function bindVendas() {
     .map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)
     .join("");
 
-   // quando mudar forma, mostra/esconde crediário
-document.getElementById("vForma")?.addEventListener("change", () => {
-  updateCrediarioInfo();
-});
+  // forma -> crediário mostra/esconde
+  document.getElementById("vForma")?.addEventListener("change", updateCrediarioInfo, { signal });
 
-// quando mexer em parcelas/dia, atualiza info
-document.getElementById("vParcelas")?.addEventListener("change", updateCrediarioInfo);
-document.getElementById("vDiaVenc")?.addEventListener("change", updateCrediarioInfo);
+  // parcelas/dia -> recalcula
+  document.getElementById("vParcelas")?.addEventListener("change", updateCrediarioInfo, { signal });
+  document.getElementById("vDiaVenc")?.addEventListener("change", updateCrediarioInfo, { signal });
 
-// quando mudar desconto, recalcula parcela
-document.getElementById("vDesconto")?.addEventListener("input", () => {
-  updateResumoOnly();
-  updateCrediarioInfo();
-});
+  // desconto -> recalcula total/parcela
+  document.getElementById("vDesconto")?.addEventListener("input", () => {
+    updateResumoOnly();
+    updateCrediarioInfo();
+  }, { signal });
 
   // filtro histórico
   document.getElementById("hVendaFiltro")?.addEventListener(
@@ -1002,8 +1026,6 @@ document.getElementById("vDesconto")?.addEventListener("input", () => {
     { signal }
   );
 
-  document.getElementById("vDesconto")?.addEventListener("input", updateResumoOnly, { signal });
-
   // salvar venda (cabeçalho + itens; estoque via TRIGGER)
   document.getElementById("btnSalvarVenda")?.addEventListener(
     "click",
@@ -1064,6 +1086,7 @@ document.getElementById("vDesconto")?.addEventListener("input", () => {
 
         const { subtotal, desconto, total } = calcResumoVenda();
 
+        // ✅ PASSO 1: campos crediário no payload (só se for crediário)
         const payload = {
           data: isoFromDatetimeLocal(dataLocal),
           forma,
@@ -1073,6 +1096,14 @@ document.getElementById("vDesconto")?.addEventListener("input", () => {
           subtotal: Number(subtotal.toFixed(2)),
           total: Number(total.toFixed(2)),
           observacoes: document.getElementById("vObs").value.trim() || null,
+
+          numero_parcelas: isCrediarioForma(forma)
+            ? Number(document.getElementById("vParcelas")?.value || 1)
+            : null,
+
+          dia_vencimento: isCrediarioForma(forma)
+            ? Number(document.getElementById("vDiaVenc")?.value || 10)
+            : null,
         };
 
         msg.textContent = state.editVendaId ? "Atualizando venda..." : "Salvando venda...";
@@ -1096,6 +1127,11 @@ document.getElementById("vDesconto")?.addEventListener("input", () => {
         document.getElementById("vTelefone").value = "";
         document.getElementById("vDesconto").value = "0,00";
         document.getElementById("vObs").value = "";
+
+        // reset crediário
+        if (document.getElementById("vParcelas")) document.getElementById("vParcelas").value = "1";
+        if (document.getElementById("vDiaVenc")) document.getElementById("vDiaVenc").value = "10";
+        updateCrediarioInfo();
 
         await reloadHistoricoVendas();
         window.dispatchEvent(new Event("forceRefreshEstoque"));
@@ -1128,6 +1164,9 @@ document.getElementById("vDesconto")?.addEventListener("input", () => {
       }
     });
   }
+
+  // estado inicial crediário
+  updateCrediarioInfo();
 }
 
 /* =========================
@@ -1174,7 +1213,6 @@ function ensureModal() {
   });
 
   document.body.appendChild(div);
-
   document.getElementById("btnFecharModalVendaItens").addEventListener("click", closeModalItens);
 }
 
@@ -1242,10 +1280,9 @@ async function abrirModalItensVenda(vendaId) {
             </tr>
           </thead>
           <tbody>
-            ${edit
-              .map((it, idx) => {
-                const total = it.quantidade * it.preco_unit;
-                return `
+            ${edit.map((it, idx) => {
+              const total = it.quantidade * it.preco_unit;
+              return `
                 <tr>
                   <td>${escapeHtml(it.produto)} <span class="small">(${escapeHtml(it.codigo_produto || "")})</span></td>
                   <td>${escapeHtml(it.cor || "-")}</td>
@@ -1268,8 +1305,7 @@ async function abrirModalItensVenda(vendaId) {
                   </td>
                 </tr>
               `;
-              })
-              .join("")}
+            }).join("")}
           </tbody>
         </table>
       </div>
