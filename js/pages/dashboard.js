@@ -17,7 +17,6 @@ function money(n) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
-/** Corrige DATE (YYYY-MM-DD) sem voltar 1 dia */
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const s = String(iso).slice(0, 10);
@@ -30,6 +29,14 @@ function fmtDateBR(iso) {
   return d2.toLocaleDateString("pt-BR");
 }
 
+function todayDateOnly() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 function startOfDayISO(d = new Date()) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
   return x.toISOString();
@@ -37,14 +44,6 @@ function startOfDayISO(d = new Date()) {
 function endOfDayISO(d = new Date()) {
   const x = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
   return x.toISOString();
-}
-function addDaysDateOnly(days) {
-  const d = new Date();
-  d.setDate(d.getDate() + days);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
 }
 
 async function safeQuery(fn) {
@@ -58,17 +57,17 @@ async function safeQuery(fn) {
   }
 }
 
-/* tenta vários selects, para não quebrar */
-async function safeSelect(table, selectTries, buildQuery) {
+/* tenta vários selects para descobrir colunas/tabelas sem quebrar */
+async function trySelect(table, selectTries, build) {
   for (const sel of selectTries) {
-    const data = await safeQuery(() => buildQuery(sb.from(table).select(sel)));
-    if (data !== null) return { ok: true, data, used: sel };
+    const data = await safeQuery(() => build(sb.from(table).select(sel)));
+    if (data !== null) return { ok: true, table, used: sel, data };
   }
-  return { ok: false, data: [], used: null };
+  return { ok: false, table, used: null, data: [] };
 }
 
 /* =========================
-   UI (layout)
+   UI
 ========================= */
 function layout() {
   return `
@@ -81,7 +80,7 @@ function layout() {
 
       <div class="card">
         <div class="card-title">Crediário</div>
-        <div class="card-sub">Vencidas e a vencer</div>
+        <div class="card-sub">Próxima parcela + resumo</div>
         <div class="small" id="credMsg" style="margin-top:10px;">Carregando...</div>
       </div>
 
@@ -117,7 +116,7 @@ function layout() {
         <div class="card-sub">Visão geral</div>
         <div class="small" style="margin-top:12px; opacity:.85;">
           • Vendas hoje<br/>
-          • Parcelas do crediário (vencidas / próximas)<br/>
+          • Próxima parcela do crediário<br/>
           • Produtos abaixo do mínimo
         </div>
       </div>
@@ -131,22 +130,21 @@ function setHtml(id, html) {
 }
 
 /* =========================
-   LOADERS (dados)
+   LOADERS
 ========================= */
 async function loadVendasHoje() {
   const start = startOfDayISO(new Date());
   const end = endOfDayISO(new Date());
 
-  // tenta por "data"
-  let r = await safeSelect(
+  // tenta por "data", fallback "created_at"
+  let r = await trySelect(
     "vendas",
     ["id,data,total", "id,data,total,forma", "id,created_at,total"],
     (q) => q.gte("data", start).lte("data", end).limit(2000)
   );
 
-  // fallback: created_at
-  if (!r.ok || !(r.used || "").includes("data")) {
-    r = await safeSelect(
+  if (!r.ok) {
+    r = await trySelect(
       "vendas",
       ["id,created_at,total", "id,created_at,total,forma"],
       (q) => q.gte("created_at", start).lte("created_at", end).limit(2000)
@@ -156,7 +154,7 @@ async function loadVendasHoje() {
   return r.ok ? r.data : null;
 }
 
-/* pega enum de formas (igual você fez no crediário.js) */
+/* enum formas crediário */
 async function loadCrediFormas() {
   const vals = await safeQuery(() => sb.rpc("enum_values", { enum_type: "forma_pagamento" }));
   if (vals === null) return ["crediario", "crediário", "credi"];
@@ -166,58 +164,80 @@ async function loadCrediFormas() {
   return filtered.length ? filtered : ["crediario", "crediário", "credi"];
 }
 
-async function loadCrediarioResumo() {
+/* resumo crediário + parcela mais próxima */
+async function loadCrediarioResumoComProxima() {
   const crediFormas = await loadCrediFormas();
 
-  // 1) vendas do crediário
   const vendas = await safeQuery(() =>
-    sb.from("vendas").select("id,forma,total").in("forma", crediFormas).limit(2000)
+    sb.from("vendas").select("id,forma,total,cliente_nome,cliente_telefone").in("forma", crediFormas).limit(3000)
   );
-  const vendasOk = Array.isArray(vendas) ? vendas : [];
-  const vendaIds = vendasOk.map((v) => String(v.id)).filter(Boolean);
-  if (!vendaIds.length) return { vencidas: [], proximas: [], totalAberto: 0, totalVencidas: 0, totalProximas: 0 };
 
-  // 2) parcelas dessas vendas
+  const vendaIds = (Array.isArray(vendas) ? vendas : []).map((v) => String(v.id)).filter(Boolean);
+  if (!vendaIds.length) {
+    return {
+      vencidasCount: 0,
+      proximas7Count: 0,
+      totalAberto: 0,
+      proximaParcela: null,
+    };
+  }
+
   const parcelas = await safeQuery(() =>
     sb
       .from("parcelas")
-      .select("id,venda_id,vencimento,valor,valor_pago_acumulado,status,numero")
+      .select("id,venda_id,numero,vencimento,valor,valor_pago_acumulado,status")
       .in("venda_id", vendaIds)
-      .limit(5000)
+      .limit(10000)
   );
-  const parc = Array.isArray(parcelas) ? parcelas : [];
 
-  const hoje = addDaysDateOnly(0);
-  const limite = addDaysDateOnly(7);
+  const hoje = todayDateOnly();
+  const limite7 = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  })();
 
-  const emAberto = parc
+  const list = (Array.isArray(parcelas) ? parcelas : [])
     .map((p) => {
       const valor = Number(p.valor || 0);
       const pago = Number(p.valor_pago_acumulado || 0);
       const saldo = Number((valor - pago).toFixed(2));
       const st = String(p.status || "").toLowerCase();
       const quit = saldo <= 0.009 || st.includes("pag");
-      return { ...p, saldo, quit };
+      const venc = String(p.vencimento).slice(0, 10);
+      return { ...p, saldo, quit, venc };
     })
     .filter((p) => !p.quit);
 
-  const vencidas = emAberto.filter((p) => String(p.vencimento).slice(0, 10) < hoje);
-  const proximas = emAberto.filter((p) => {
-    const vd = String(p.vencimento).slice(0, 10);
-    return vd >= hoje && vd <= limite;
-  });
+  const vencidas = list.filter((p) => p.venc < hoje);
+  const proximas7 = list.filter((p) => p.venc >= hoje && p.venc <= limite7);
 
-  const totalAberto = emAberto.reduce((s, p) => s + Number(p.saldo || 0), 0);
-  const totalVencidas = vencidas.reduce((s, p) => s + Number(p.saldo || 0), 0);
-  const totalProximas = proximas.reduce((s, p) => s + Number(p.saldo || 0), 0);
+  const totalAberto = list.reduce((s, p) => s + Number(p.saldo || 0), 0);
 
-  return { vencidas, proximas, totalAberto, totalVencidas, totalProximas };
+  // pega a próxima a vencer (>= hoje). se não tiver, pega a mais atrasada (menor vencimento)
+  const proximasOrdenadas = [...list].sort((a, b) => (a.venc > b.venc ? 1 : a.venc < b.venc ? -1 : 0));
+  const prox = proximasOrdenadas.find((p) => p.venc >= hoje) || proximasOrdenadas[0] || null;
+
+  let proximaParcela = null;
+  if (prox) {
+    const venda = (vendas || []).find((v) => String(v.id) === String(prox.venda_id)) || null;
+    proximaParcela = { ...prox, venda };
+  }
+
+  return {
+    vencidasCount: vencidas.length,
+    proximas7Count: proximas7.length,
+    totalAberto,
+    proximaParcela,
+  };
 }
 
-/* Estoque baixo: tenta várias combinações de nomes */
+/* Estoque baixo: tenta produtos, se falhar tenta estoque */
 async function loadEstoqueBaixo() {
-  // tenta tabela produtos
-  const tries = [
+  const selectTries = [
     "id,nome,estoque,estoque_minimo",
     "id,nome,quantidade,estoque_minimo",
     "id,nome,quantidade_atual,estoque_minimo",
@@ -227,56 +247,65 @@ async function loadEstoqueBaixo() {
     "id,nome,qtd,minimo",
     "id,descricao,estoque,estoque_minimo",
     "id,descricao,quantidade,minimo",
+    "id,produto_nome,estoque,estoque_minimo",
+    "id,produto_nome,quantidade,minimo",
   ];
 
-  const r = await safeSelect("produtos", tries, (q) => q.limit(5000));
-  if (!r.ok) return null;
+  // 1) tenta produtos
+  let r = await trySelect("produtos", selectTries, (q) => q.limit(8000));
+
+  // 2) tenta estoque
+  if (!r.ok) {
+    r = await trySelect("estoque", selectTries, (q) => q.limit(8000));
+  }
+
+  if (!r.ok) return { ok: false, items: [], table: null };
 
   const rows = r.data || [];
-  if (!rows.length) return [];
+  if (!rows.length) return { ok: true, items: [], table: r.table };
 
-  // descobre chaves existentes no sample
-  const s = rows[0] || {};
+  const sample = rows[0] || {};
 
-  const nomeKey = s.nome != null ? "nome" : (s.descricao != null ? "descricao" : "nome");
+  const nomeKey =
+    sample.nome != null ? "nome" :
+    (sample.produto_nome != null ? "produto_nome" :
+    (sample.descricao != null ? "descricao" : "nome"));
 
   const estoqueKey =
-    s.estoque != null ? "estoque" :
-    (s.quantidade_atual != null ? "quantidade_atual" :
-    (s.quantidade != null ? "quantidade" :
-    (s.qtd != null ? "qtd" : "estoque")));
+    sample.estoque != null ? "estoque" :
+    (sample.quantidade_atual != null ? "quantidade_atual" :
+    (sample.quantidade != null ? "quantidade" :
+    (sample.qtd != null ? "qtd" : "estoque")));
 
   const minimoKey =
-    s.estoque_minimo != null ? "estoque_minimo" :
-    (s.minimo != null ? "minimo" :
-    (s.min_estoque != null ? "min_estoque" : "estoque_minimo"));
+    sample.estoque_minimo != null ? "estoque_minimo" :
+    (sample.minimo != null ? "minimo" :
+    (sample.min_estoque != null ? "min_estoque" : "estoque_minimo"));
 
-  const out = rows
+  const items = rows
     .map((p) => {
       const est = Number(p[estoqueKey] ?? 0);
       const min = Number(p[minimoKey] ?? 0);
       return { id: p.id, nome: p[nomeKey], est, min };
     })
     .filter((x) => Number.isFinite(x.min) && x.min > 0 && Number.isFinite(x.est) && x.est <= x.min)
-    .sort((a, b) => (a.est - b.est))
+    .sort((a, b) => a.est - b.est)
     .slice(0, 12);
 
-  return out;
+  return { ok: true, items, table: r.table };
 }
 
 async function loadRelatorioPeriodo(inicioYYYYMMDD, fimYYYYMMDD) {
   const ini = `${inicioYYYYMMDD}T00:00:00.000Z`;
   const fim = `${fimYYYYMMDD}T23:59:59.999Z`;
 
-  // tenta por "data"
   let rows = await safeQuery(() =>
-    sb.from("vendas").select("id,total,data").gte("data", ini).lte("data", fim).limit(10000)
+    sb.from("vendas").select("id,total,data").gte("data", ini).lte("data", fim).limit(20000)
   );
 
-  // fallback created_at
   if (rows === null) {
     rows = await safeQuery(() =>
-      sb.from("vendas").select("id,total,created_at").gte("created_at", ini).lte("created_at", fim).limit(10000)
+      sb.from("vendas").select("id,total,created_at").gte("created_at", ini).lte("created_at", fim).limit(20000)
     );
   }
 
@@ -292,7 +321,7 @@ async function loadRelatorioPeriodo(inicioYYYYMMDD, fimYYYYMMDD) {
    FILL UI
 ========================= */
 async function fillDashboard() {
-  // Vendas Hoje
+  // Vendas hoje
   const vendasHoje = await loadVendasHoje();
   if (vendasHoje === null) {
     setHtml("vHojeMsg", "Não consegui carregar vendas hoje.");
@@ -306,35 +335,66 @@ async function fillDashboard() {
     );
   }
 
-  // Crediário
-  const cred = await loadCrediarioResumo();
-  if (!cred) {
-    setHtml("credMsg", "Não consegui carregar crediário.");
-  } else {
-    setHtml(
-      "credMsg",
-      `<div class="small"><b>Vencidas:</b> ${cred.vencidas.length} • <b>${money(cred.totalVencidas)}</b></div>
-       <div class="small"><b>Próx. 7 dias:</b> ${cred.proximas.length} • <b>${money(cred.totalProximas)}</b></div>
-       <div style="margin-top:8px; font-weight:900; font-size:1.05rem;">Aberto: ${money(cred.totalAberto)}</div>`
-    );
+  // Crediário: resumo + próxima parcela
+  const cred = await loadCrediarioResumoComProxima();
+  const pp = cred?.proximaParcela;
+
+  let blocoProxima = `<div class="small" style="opacity:.9;">Sem parcelas em aberto ✅</div>`;
+  if (pp) {
+    const cliente = pp?.venda?.cliente_nome || "Cliente";
+    const tel = pp?.venda?.cliente_telefone || "";
+    blocoProxima = `
+      <div class="card" style="margin-top:10px; padding:12px;">
+        <div style="font-weight:900;">Próxima parcela</div>
+        <div class="small" style="margin-top:6px;">
+          <b>${escapeHtml(cliente)}</b> ${tel ? `• ${escapeHtml(tel)}` : ""}
+        </div>
+        <div class="small" style="margin-top:4px;">
+          Venc: <b>${fmtDateBR(pp.vencimento)}</b> • Nº <b>${Number(pp.numero || 0)}</b>
+        </div>
+        <div class="small" style="margin-top:4px;">
+          Saldo: <b>${money(pp.saldo)}</b>
+        </div>
+        <div style="margin-top:10px;">
+          <button class="btn primary" id="goCred">Abrir no Crediário</button>
+        </div>
+      </div>
+    `;
+  }
+
+  setHtml(
+    "credMsg",
+    `<div class="small"><b>Vencidas:</b> ${cred.vencidasCount}</div>
+     <div class="small"><b>Próx. 7 dias:</b> ${cred.proximas7Count}</div>
+     <div style="margin-top:8px; font-weight:900; font-size:1.05rem;">Aberto: ${money(cred.totalAberto)}</div>
+     ${blocoProxima}`
+  );
+
+  // bind botão abrir crediário
+  const btn = document.getElementById("goCred");
+  if (btn) {
+    btn.addEventListener("click", () => {
+      window.location.hash = "#crediario";
+    });
   }
 
   // Estoque baixo
-  const baixo = await loadEstoqueBaixo();
-  if (baixo === null) {
+  const est = await loadEstoqueBaixo();
+  if (!est.ok) {
     setHtml(
       "estMsg",
-      `Não encontrei a tabela <b>produtos</b> ou as colunas de estoque/min.<br/>
-       (Me diga o nome da tabela/colunas que eu ajusto em 1 minuto.)`
+      `Não encontrei as tabelas <b>produtos</b> nem <b>estoque</b> com colunas compatíveis.<br/>
+       (Se você me disser o nome exato da tabela/colunas eu deixo perfeito.)`
     );
-  } else if (!baixo.length) {
-    setHtml("estMsg", "Nenhum item abaixo do mínimo ✅");
+  } else if (!est.items.length) {
+    setHtml("estMsg", `Nenhum item abaixo do mínimo ✅`);
   } else {
     setHtml(
       "estMsg",
-      `<div class="small" style="margin-bottom:8px;"><b>${baixo.length}</b> item(ns) críticos</div>
+      `<div class="small" style="margin-bottom:8px;"><b>${est.items.length}</b> item(ns) críticos</div>
+       <div class="small" style="opacity:.75; margin-bottom:8px;">Fonte: tabela <b>${escapeHtml(est.table)}</b></div>
        <div class="small" style="display:grid; gap:6px;">
-         ${baixo
+         ${est.items
            .map(
              (p) =>
                `<div style="display:flex; justify-content:space-between; gap:10px;">
@@ -355,8 +415,14 @@ function bindPeriodo() {
   const btn = document.getElementById("rpBtn");
 
   if (ini && fim) {
-    ini.value = addDaysDateOnly(-7);
-    fim.value = addDaysDateOnly(0);
+    // padrão: últimos 7 dias
+    const d1 = new Date();
+    d1.setDate(d1.getDate() - 7);
+    const yyyy = d1.getFullYear();
+    const mm = String(d1.getMonth() + 1).padStart(2, "0");
+    const dd = String(d1.getDate()).padStart(2, "0");
+    ini.value = `${yyyy}-${mm}-${dd}`;
+    fim.value = todayDateOnly();
   }
 
   btn?.addEventListener("click", async () => {
