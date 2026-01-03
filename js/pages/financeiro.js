@@ -43,7 +43,7 @@ async function somarVendas(inicio, fim) {
  */
 async function somarCompras(inicio, fim) {
   const { data, error } = await sb
-    .from("vw_compra_resumo")
+    .from("vw_compras_resumo") // ✅ NOME CERTO
     .select("total_item, data")
     .gte("data", inicio)
     .lte("data", fim)
@@ -51,11 +51,9 @@ async function somarCompras(inicio, fim) {
 
   if (error) throw error;
 
-  return (data || []).reduce(
-    (s, r) => s + Number(r.total_item || 0),
-    0
-  );
+  return (data || []).reduce((s, r) => s + Number(r.total_item || 0), 0);
 }
+
 
 
 /* =========================
