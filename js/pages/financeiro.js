@@ -37,7 +37,38 @@ async function somarVendas(inicio, fim) {
   return (data || []).reduce((s, r) => s + Number(r.total || 0), 0);
 }
 
+/**
+ * ✅ Compras: não some "compras.total" porque no seu print está tudo 0.00.
+ * O correto é somar o total calculado (view) ou o total vindo dos itens.
+ */
 async function somarCompras(inicio, fim) {
+  // 1) tenta pela VIEW (recomendado)
+  try {
+    const { data, error } = await sb
+      .from("vw_compra_resumo")
+      .select("*")
+      .gte("data", inicio)
+      .lte("data", fim)
+      .limit(10000);
+
+    if (error) throw error;
+
+    // tenta achar o campo total em alguns nomes comuns
+    const soma = (data || []).reduce((s, r) => {
+      const v =
+        r.total ??
+        r.total_compra ??
+        r.valor_total ??
+        0;
+      return s + Number(v || 0);
+    }, 0);
+
+    return soma;
+  } catch (e) {
+    console.warn("VIEW vw_compra_resumo falhou, tentando compras.total (provavelmente vai dar 0).", e);
+  }
+
+  // 2) fallback (vai dar 0 no seu caso enquanto compras.total estiver 0.00)
   const { data, error } = await sb
     .from("compras")
     .select("total, data")
@@ -105,8 +136,11 @@ async function atualizar() {
   msg.textContent = "Calculando...";
 
   try {
-    const vendas = await somarVendas(ini, fim);
-    const compras = await somarCompras(ini, fim);
+    const [vendas, compras] = await Promise.all([
+      somarVendas(ini, fim),
+      somarCompras(ini, fim),
+    ]);
+
     const lucro = vendas - compras;
 
     outV.textContent = money(vendas);
@@ -136,7 +170,6 @@ export async function renderFinanceiro() {
 
     document.getElementById("finAplicar").addEventListener("click", atualizar);
 
-    // auto carregar
     atualizar();
   }, 0);
 
