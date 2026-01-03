@@ -59,11 +59,12 @@ function clamp0(n) {
    STATE
 ========================= */
 const state = {
-  cred: [], // lista de vendas no crediário (já com total_pago e saldo_aberto calculados)
+  cred: [],
   parcelas: [],
   formas: [],
   vendaSelecionada: null,
   paySel: new Set(), // parcela_id
+  crediFormas: [],   // valores do ENUM que são crediário
 };
 
 window.__crediarioState = state;
@@ -71,31 +72,71 @@ window.__crediarioState = state;
 /* =========================
    LOADERS
 ========================= */
+async function loadEnumValues(enumType) {
+  const { data, error } = await sb.rpc("enum_values", { enum_type: enumType });
+  if (error) throw error;
+  return (data || []).map((x) => x.value);
+}
+
 async function loadFormasEnum() {
-  const tries = ["forma_pagamento", "forma"];
-  for (const enumType of tries) {
-    const { data, error } = await sb.rpc("enum_values", { enum_type: enumType });
-    if (!error) return (data || []).map((x) => x.value);
+  // seu enum real é forma_pagamento (segundo seu print)
+  try {
+    return await loadEnumValues("forma_pagamento");
+  } catch (e) {
+    // fallback (não quebra a tela)
+    console.warn("Falhou enum forma_pagamento:", e?.message);
+    return [];
   }
-  return [];
+}
+
+async function loadCrediFormas() {
+  // pega os valores do enum e filtra os que contêm "credi"
+  let vals = [];
+  try {
+    vals = await loadEnumValues("forma_pagamento");
+  } catch (e) {
+    vals = [];
+  }
+
+  const filtered = (vals || []).filter((v) => String(v).toLowerCase().includes("credi"));
+
+  // fallback duro caso enum_values falhe
+  if (!filtered.length) {
+    return ["crediario", "crediário", "credi"].filter(Boolean);
+  }
+  return filtered;
 }
 
 /**
- * Lista SOMENTE vendas cuja forma contenha "credi"
- * e calcula total_pago / saldo_aberto a partir da tabela public.parcelas
+ * ✅ Lista SOMENTE vendas do crediário
+ * IMPORTANTÍSSIMO: NÃO usa ILIKE no enum (isso causava: operator does not exist: forma_pagamento ~~* unknown)
+ * => usa IN com os valores do enum que têm "credi"
  */
 async function loadCrediario() {
-  // 1) Puxa vendas do crediário
-  const { data: vendas, error: e1 } = await sb
+  // 0) descobre quais valores do enum são "crediário"
+  if (!state.crediFormas?.length) {
+    state.crediFormas = await loadCrediFormas();
+  }
+
+  // 1) puxa vendas do crediário
+  let q = sb
     .from("vendas")
     .select(
       "id,data,forma,cliente_nome,cliente_telefone,cliente_endereco,subtotal,desconto_valor,total,observacoes,created_at,updated_at,numero_parcelas,dia_vencimento"
     )
-    .ilike("forma", "%credi%")
     .order("data", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(200);
 
+  // se tiver lista de formas credi, usa IN (perfeito p/ enum)
+  if (state.crediFormas?.length) {
+    q = q.in("forma", state.crediFormas);
+  } else {
+    // fallback: tenta eq (não deve acontecer)
+    q = q.eq("forma", "crediario");
+  }
+
+  const { data: vendas, error: e1 } = await q;
   if (e1) throw e1;
 
   const v = (vendas || []).map((r) => ({
@@ -106,7 +147,7 @@ async function loadCrediario() {
 
   if (!v.length) return [];
 
-  // 2) Puxa parcelas dessas vendas para somar pagos
+  // 2) puxa parcelas dessas vendas pra somar pagos
   const ids = v.map((x) => x.venda_id).filter(Boolean);
 
   const { data: parc, error: e2 } = await sb
@@ -116,24 +157,27 @@ async function loadCrediario() {
 
   if (e2) throw e2;
 
-  // 3) Agrega por venda_id
+  // 3) agrega por venda_id
   const acc = new Map(); // venda_id -> { total_pago }
   for (const p of parc || []) {
     const vid = normId(p.venda_id);
     if (!vid) continue;
+
     const valor = Number(p.valor || 0);
     const pagoAc = Number(p.valor_pago_acumulado || 0);
     const pago = Math.min(valor, clamp0(pagoAc));
+
     const cur = acc.get(vid) || { total_pago: 0 };
     cur.total_pago += pago;
     acc.set(vid, cur);
   }
 
-  // 4) Monta resumo final
+  // 4) monta resumo final
   return v.map((row) => {
     const total = Number(row.total || 0);
     const total_pago = Number(acc.get(row.venda_id)?.total_pago || 0);
     const saldo_aberto = clamp0(total - total_pago);
+
     return {
       ...row,
       total,
@@ -145,6 +189,7 @@ async function loadCrediario() {
 
 async function loadParcelas(vendaId) {
   const vid = normId(vendaId);
+
   const { data, error } = await sb
     .from("parcelas")
     .select("id,venda_id,numero,vencimento,valor,status,valor_pago_acumulado,created_at")
@@ -172,13 +217,38 @@ async function registrarPagamentoRPC(payload) {
 function renderCrediarioLayout() {
   return `
     <style>
-      /* garante clique/seleção nas linhas */
-      #cTbody tr[data-open] { cursor:pointer; }
-      #cTbody tr[data-open]:hover { filter: brightness(1.08); }
-      #cTbody tr.is-selected { outline: 2px solid rgba(110,168,254,.55); outline-offset:-2px; }
-      .table-wrap { position: relative; pointer-events:auto; }
-      .table { width:100%; border-collapse: collapse; }
-      .table td, .table th { vertical-align: top; }
+      /* ===== Layout responsivo e sem “corte” ===== */
+      .row2{
+        display:grid;
+        grid-template-columns: 1.05fr 1fr;
+        gap:14px;
+        align-items:start;
+      }
+      @media (max-width: 980px){
+        .row2{ grid-template-columns: 1fr; }
+      }
+
+      .table-wrap{
+        overflow:auto;
+        max-width:100%;
+        -webkit-overflow-scrolling: touch;
+      }
+      .table{
+        width:100%;
+        min-width: 820px; /* impede cortar colunas; vira scroll horizontal */
+        border-collapse: collapse;
+      }
+      @media (max-width: 980px){
+        .table{ min-width: 860px; }
+      }
+
+      /* ===== Clique/seleção ===== */
+      #cTbody tr[data-open]{ cursor:pointer; }
+      #cTbody tr[data-open]:hover{ filter: brightness(1.08); }
+      #cTbody tr.is-selected{ outline:2px solid rgba(110,168,254,.55); outline-offset:-2px; }
+
+      /* botão */
+      .btn{ cursor:pointer; }
     </style>
 
     <div class="row2">
@@ -199,13 +269,13 @@ function renderCrediarioLayout() {
           <table class="table">
             <thead>
               <tr>
-                <th>Data</th>
-                <th>Cliente</th>
-                <th>Total</th>
-                <th>Pago</th>
-                <th>Aberto</th>
-                <th>Status</th>
-                <th style="width:140px;">Ações</th>
+                <th style="min-width:110px;">Data</th>
+                <th style="min-width:220px;">Cliente</th>
+                <th style="min-width:120px;">Total</th>
+                <th style="min-width:120px;">Pago</th>
+                <th style="min-width:120px;">Aberto</th>
+                <th style="min-width:130px;">Status</th>
+                <th style="min-width:170px;">Ação</th>
               </tr>
             </thead>
             <tbody id="cTbody">
@@ -217,7 +287,7 @@ function renderCrediarioLayout() {
 
       <div class="card">
         <div class="card-title">Detalhes</div>
-        <div class="card-sub">Selecione uma venda para ver parcelas e marcar como pagas.</div>
+        <div class="card-sub">Clique em <b>Ver detalhes</b> em uma venda para ver parcelas.</div>
 
         <div class="small" id="cMsg" style="margin-top:10px;"></div>
 
@@ -237,6 +307,7 @@ function markSelectedRow(vendaId) {
   const tbody = document.getElementById("cTbody");
   if (!tbody) return;
   tbody.querySelectorAll("tr").forEach((tr) => tr.classList.remove("is-selected"));
+  if (!vid) return;
   const tr = tbody.querySelector(`tr[data-open="${CSS.escape(vid)}"]`);
   if (tr) tr.classList.add("is-selected");
 }
@@ -278,14 +349,14 @@ function renderTabelaCred(filtro = "") {
           <td>${money(r.saldo_aberto || 0)}</td>
           <td>${status}</td>
           <td>
-            <button class="btn primary" data-openbtn="${vid}">Abrir</button>
+            <button class="btn primary" data-openbtn="${vid}">Ver detalhes</button>
           </td>
         </tr>
       `;
     })
     .join("");
 
-  // Clique na LINHA inteira
+  // Clique na linha (também abre)
   tbody.querySelectorAll("tr[data-open]").forEach((tr) => {
     tr.addEventListener("click", async () => {
       const vid = tr.getAttribute("data-open");
@@ -293,7 +364,7 @@ function renderTabelaCred(filtro = "") {
     });
   });
 
-  // Clique no botão (sem “duplo clique”)
+  // Clique no botão (não duplica)
   tbody.querySelectorAll("button[data-openbtn]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.preventDefault();
@@ -325,6 +396,13 @@ async function abrirVenda(vendaId) {
   renderDetalhes();
 }
 
+function parcelaQuitada(p) {
+  const valor = Number(p.valor || 0);
+  const pagoAc = Number(p.valor_pago_acumulado || 0);
+  const saldo = Number((valor - pagoAc).toFixed(2));
+  return saldo <= 0.009;
+}
+
 function renderDetalhes() {
   const venda = state.vendaSelecionada;
   const box = document.getElementById("detBox");
@@ -338,54 +416,26 @@ function renderDetalhes() {
   const total = Number(venda.total || 0);
   const pago = Number(venda.total_pago || 0);
   const aberto = Number(venda.saldo_aberto || 0);
-
   const endereco = venda.cliente_endereco || "";
-
-  const formasOptions = (state.formas || [])
-    .map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)
-    .join("");
-
   const statusVenda = isQuitado(venda) ? "Pago ✅" : "Em aberto";
 
   box.innerHTML = `
     <div class="card" style="margin-bottom:12px;">
-      <div style="font-weight:800;">${escapeHtml(venda.cliente_nome || "Cliente")}</div>
+      <div style="font-weight:800; font-size: 1.05rem;">${escapeHtml(venda.cliente_nome || "Cliente")}</div>
       <div class="small">${escapeHtml(venda.cliente_telefone || "")}</div>
       ${endereco ? `<div class="small" style="margin-top:4px;">${escapeHtml(endereco)}</div>` : ""}
-      <div class="small" style="margin-top:6px;">
-        Status: <b>${statusVenda}</b><br/>
-        Total: <b>${money(total)}</b> • Pago: <b>${money(pago)}</b> • Aberto: <b>${money(aberto)}</b>
-      </div>
-    </div>
 
-    <div class="card" style="margin-bottom:12px;">
-      <div style="font-weight:800;">Pagamento rápido</div>
-      <div class="small" style="margin-top:4px;">
-        Use isso quando o cliente pagou um valor qualquer (entrada, parcial, etc).
-      </div>
-
-      <div class="grid grid-3" style="gap:10px; margin-top:10px;">
-        <div class="field">
-          <label>Data</label>
-          <input class="input" id="pgData" type="date" />
+      <div class="small" style="margin-top:10px;">
+        <div>Data: <b>${fmtDateBR(venda.data)}</b></div>
+        <div>Forma: <b>${escapeHtml(String(venda.forma || ""))}</b></div>
+        <div>Status: <b>${statusVenda}</b></div>
+        <div style="margin-top:6px;">
+          Total: <b>${money(total)}</b> • Pago: <b>${money(pago)}</b> • Aberto: <b>${money(aberto)}</b>
         </div>
-        <div class="field">
-          <label>Valor (R$)</label>
-          <input class="input" id="pgValor" placeholder="Ex: 50,00" />
-        </div>
-        <div class="field">
-          <label>Forma</label>
-          <select class="select" id="pgForma">${formasOptions}</select>
-        </div>
-      </div>
-
-      <div class="field" style="margin-top:10px;">
-        <label>Obs</label>
-        <input class="input" id="pgObs" placeholder="Opcional" />
+        ${venda.observacoes ? `<div style="margin-top:6px;">Obs: ${escapeHtml(venda.observacoes)}</div>` : ""}
       </div>
 
       <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-        <button class="btn primary" id="btnSalvarPg">Salvar pagamento</button>
         <button class="btn" id="btnFecharVenda">Fechar</button>
       </div>
     </div>
@@ -393,21 +443,24 @@ function renderDetalhes() {
     <div class="card">
       <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
         <div style="font-weight:800;">Parcelas</div>
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
-          <button class="btn primary" id="btnPagarSelecionadas">Marcar selecionadas como pagas</button>
-        </div>
+        <button class="btn primary" id="btnPagarSelecionadas">Marcar selecionadas como pagas</button>
       </div>
 
       <div class="small" style="margin-top:6px;">
-        Marque as parcelas e clique em <b>Marcar selecionadas como pagas</b>. (Ele paga exatamente o saldo de cada parcela.)
+        Marque a parcela do mês que foi paga e clique em <b>Marcar selecionadas como pagas</b>.
       </div>
 
       <div class="table-wrap" style="margin-top:10px;">
-        <table class="table">
+        <table class="table" style="min-width: 760px;">
           <thead>
             <tr>
               <th style="width:70px;">Pagar</th>
-              <th>Nº</th><th>Venc.</th><th>Valor</th><th>Pago</th><th>Saldo</th><th>Status</th>
+              <th style="width:70px;">Nº</th>
+              <th style="width:140px;">Venc.</th>
+              <th style="width:140px;">Valor</th>
+              <th style="width:140px;">Pago</th>
+              <th style="width:140px;">Saldo</th>
+              <th style="width:150px;">Status</th>
             </tr>
           </thead>
           <tbody id="parcTbody">
@@ -420,14 +473,13 @@ function renderDetalhes() {
                       const pagoAc = Number(p.valor_pago_acumulado || 0);
                       const saldo = Number((valor - pagoAc).toFixed(2));
                       const quit = saldo <= 0.009;
-                      const status = quit ? "Pago ✅" : (p.status || "em_aberto");
 
                       return `
                         <tr>
                           <td>
                             ${
                               quit
-                                ? `<span class="small">—</span>`
+                                ? `<span class="small">✅</span>`
                                 : `<input type="checkbox" data-pay="${escapeHtml(parcela_id)}" />`
                             }
                           </td>
@@ -436,7 +488,7 @@ function renderDetalhes() {
                           <td>${money(valor)}</td>
                           <td>${money(pagoAc)}</td>
                           <td>${money(clamp0(saldo))}</td>
-                          <td>${escapeHtml(status)}</td>
+                          <td>${quit ? "Pago ✅" : escapeHtml(String(p.status || "em_aberto"))}</td>
                         </tr>
                       `;
                     })
@@ -449,20 +501,16 @@ function renderDetalhes() {
     </div>
   `;
 
-  // default data hoje
-  const elPgData = document.getElementById("pgData");
-  if (elPgData) elPgData.value = toISODateToday();
-
   document.getElementById("btnFecharVenda").addEventListener("click", () => {
     state.vendaSelecionada = null;
     state.parcelas = [];
     state.paySel = new Set();
     box.innerHTML = "Nenhuma venda selecionada.";
-    markSelectedRow(""); // limpa seleção visual
+    markSelectedRow("");
     showToast("", "info");
   });
 
-  // binds checkbox seleção
+  // binds seleção
   document.querySelectorAll("input[data-pay]").forEach((chk) => {
     chk.addEventListener("change", () => {
       const pid = normId(chk.dataset.pay);
@@ -472,7 +520,7 @@ function renderDetalhes() {
     });
   });
 
-  // pagar selecionadas
+  // marcar selecionadas como pagas (paga o SALDO de cada parcela)
   document.getElementById("btnPagarSelecionadas").addEventListener("click", async () => {
     const vendaAtual = state.vendaSelecionada;
     if (!vendaAtual) return;
@@ -480,24 +528,24 @@ function renderDetalhes() {
     const ids = Array.from(state.paySel.values()).filter(Boolean);
     if (!ids.length) return showToast("Marque pelo menos 1 parcela.", "error");
 
-    const data_pagamento = document.getElementById("pgData")?.value || toISODateToday();
-    const forma = document.getElementById("pgForma")?.value || null;
-
-    if (!forma) return showToast("Selecione a forma.", "error");
+    // Forma do pagamento: aqui eu uso a própria forma da venda como padrão,
+    // você pode trocar depois se quiser adicionar select.
+    const forma = String(vendaAtual.forma || "crediario");
+    const data_pagamento = toISODateToday();
 
     const mapParc = new Map((state.parcelas || []).map((p) => [normId(p.parcela_id || p.id), p]));
 
-    showToast("Registrando pagamento das parcelas...", "info");
+    showToast("Registrando pagamento...", "info");
 
     try {
       for (const parcela_id of ids) {
         const p = mapParc.get(parcela_id);
         if (!p) continue;
+        if (parcelaQuitada(p)) continue;
 
         const valor = Number(p.valor || 0);
         const pagoAc = Number(p.valor_pago_acumulado || 0);
         const saldo = Number((valor - pagoAc).toFixed(2));
-
         if (saldo <= 0.009) continue;
 
         await registrarPagamentoRPC({
@@ -513,48 +561,13 @@ function renderDetalhes() {
 
       showToast("Parcelas marcadas como pagas ✅", "success");
 
-      // recarrega lista + abre de novo
+      // recarrega lista + reabre venda
       state.cred = await loadCrediario();
       renderTabelaCred(document.getElementById("fCred")?.value || "");
       await abrirVenda(vendaAtual.venda_id);
     } catch (e) {
       console.error(e);
       showToast(e?.message || "Erro ao marcar parcelas como pagas.", "error");
-    }
-  });
-
-  // pagamento rápido (valor solto)
-  document.getElementById("btnSalvarPg").addEventListener("click", async () => {
-    const vendaAtual = state.vendaSelecionada;
-    if (!vendaAtual) return;
-
-    const data_pagamento = document.getElementById("pgData")?.value || "";
-    const valor_pago = parseNumberBR(document.getElementById("pgValor")?.value || "0");
-    const forma = document.getElementById("pgForma")?.value || "";
-    const observacoes = (document.getElementById("pgObs")?.value || "").trim() || null;
-
-    if (!data_pagamento) return showToast("Informe a data do pagamento.", "error");
-    if (!valor_pago || valor_pago <= 0) return showToast("Valor inválido.", "error");
-    if (!forma) return showToast("Selecione a forma.", "error");
-
-    showToast("Salvando pagamento...", "info");
-    try {
-      await registrarPagamentoRPC({
-        venda_id: vendaAtual.venda_id,
-        data_pagamento,
-        valor_pago: Number(valor_pago.toFixed(2)),
-        forma,
-        observacoes,
-      });
-
-      showToast("Pagamento registrado ✅", "success");
-
-      state.cred = await loadCrediario();
-      renderTabelaCred(document.getElementById("fCred")?.value || "");
-      await abrirVenda(vendaAtual.venda_id);
-    } catch (e) {
-      console.error(e);
-      showToast(e?.message || "Erro ao registrar pagamento.", "error");
     }
   });
 }
@@ -568,7 +581,15 @@ export async function renderCrediario() {
 
     setTimeout(async () => {
       try {
+        showToast("", "info");
+
+        // carrega formas do enum (pra você usar em outros lugares se quiser)
         state.formas = await loadFormasEnum();
+
+        // carrega as formas que são crediário (resolve o ERRO do ILIKE no enum)
+        state.crediFormas = await loadCrediFormas();
+
+        // lista vendas
         state.cred = await loadCrediario();
 
         renderTabelaCred("");
@@ -582,6 +603,12 @@ export async function renderCrediario() {
       } catch (e) {
         console.error(e);
         showToast(e?.message || "Erro ao iniciar Crediário.", "error");
+
+        // deixa a tabela “vazia” de forma bonita
+        const tbody = document.getElementById("cTbody");
+        const info = document.getElementById("cInfo");
+        if (info) info.textContent = "0 venda(s) no crediário.";
+        if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="small">Erro ao carregar vendas.</td></tr>`;
       }
     }, 0);
 
