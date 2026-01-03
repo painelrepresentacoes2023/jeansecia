@@ -112,23 +112,20 @@ async function atualizar() {
   msg.textContent = "Calculando...";
 
   try {
-    const [vendas, compras] = await Promise.all([
-      somarVendas(ini, fim),
-      somarCompras(ini, fim),
-    ]);
-
-    const lucro = vendas - compras;
-
+    const vendas = await somarVendas(ini, fim);
     outV.textContent = money(vendas);
-    outC.textContent = money(compras);
-    outL.textContent = money(lucro);
 
+    const compras = await somarCompras(ini, fim);
+    outC.textContent = money(compras);
+
+    outL.textContent = money(vendas - compras);
     msg.textContent = "Resumo atualizado com sucesso.";
   } catch (e) {
-    console.error(e);
-    msg.textContent = "Erro ao calcular financeiro.";
+    console.error("FINANCEIRO_ERRO:", e);
+    msg.textContent = `Erro ao calcular financeiro: ${e?.message || "ver console"}`;
   }
 }
+
 
 /* =========================
    EXPORT
