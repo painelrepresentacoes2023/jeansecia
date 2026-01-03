@@ -43,16 +43,17 @@ async function somarVendas(inicio, fim) {
  */
 async function somarCompras(inicio, fim) {
   const { data, error } = await sb
-    .from("vw_compras_resumo") // ✅ NOME CERTO
-    .select("total_item, data")
+    .from("vw_compras_resumo")
+    .select("total_itens, data")
     .gte("data", inicio)
     .lte("data", fim)
     .limit(10000);
 
   if (error) throw error;
 
-  return (data || []).reduce((s, r) => s + Number(r.total_item || 0), 0);
+  return (data || []).reduce((s, r) => s + Number(r.total_itens || 0), 0);
 }
+
 
 
 
