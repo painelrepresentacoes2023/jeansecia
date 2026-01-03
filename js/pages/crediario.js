@@ -26,7 +26,7 @@ function money(n) {
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  if (Number.isNaN(d.getTime())) return String(iso);
   return d.toLocaleDateString("pt-BR");
 }
 
@@ -59,11 +59,10 @@ function clamp0(n) {
    STATE
 ========================= */
 const state = {
-  cred: [],
+  cred: [], // lista de vendas no crediário (já com total_pago e saldo_aberto calculados)
   parcelas: [],
   formas: [],
   vendaSelecionada: null,
-  // seleção de parcelas para pagar em lote
   paySel: new Set(), // parcela_id
 };
 
@@ -73,8 +72,6 @@ window.__crediarioState = state;
    LOADERS
 ========================= */
 async function loadFormasEnum() {
-  // teu projeto já usou "forma_pagamento" no vendas.js
-  // aqui tenta os 2 sem quebrar
   const tries = ["forma_pagamento", "forma"];
   for (const enumType of tries) {
     const { data, error } = await sb.rpc("enum_values", { enum_type: enumType });
@@ -83,28 +80,74 @@ async function loadFormasEnum() {
   return [];
 }
 
+/**
+ * Lista SOMENTE vendas cuja forma contenha "credi"
+ * e calcula total_pago / saldo_aberto a partir da tabela public.parcelas
+ */
 async function loadCrediario() {
-  const { data, error } = await sb
-    .from("vw_crediario_resumo")
-    .select("*")
+  // 1) Puxa vendas do crediário
+  const { data: vendas, error: e1 } = await sb
+    .from("vendas")
+    .select(
+      "id,data,forma,cliente_nome,cliente_telefone,cliente_endereco,subtotal,desconto_valor,total,observacoes,created_at,updated_at,numero_parcelas,dia_vencimento"
+    )
+    .ilike("forma", "%credi%")
     .order("data", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(200);
 
-  if (error) throw error;
+  if (e1) throw e1;
 
-  // normaliza ids
-  return (data || []).map((r) => ({
+  const v = (vendas || []).map((r) => ({
     ...r,
-    venda_id: normId(r.venda_id),
+    venda_id: normId(r.id),
+    id: normId(r.id),
   }));
+
+  if (!v.length) return [];
+
+  // 2) Puxa parcelas dessas vendas para somar pagos
+  const ids = v.map((x) => x.venda_id).filter(Boolean);
+
+  const { data: parc, error: e2 } = await sb
+    .from("parcelas")
+    .select("id,venda_id,valor,valor_pago_acumulado,status")
+    .in("venda_id", ids);
+
+  if (e2) throw e2;
+
+  // 3) Agrega por venda_id
+  const acc = new Map(); // venda_id -> { total_pago }
+  for (const p of parc || []) {
+    const vid = normId(p.venda_id);
+    if (!vid) continue;
+    const valor = Number(p.valor || 0);
+    const pagoAc = Number(p.valor_pago_acumulado || 0);
+    const pago = Math.min(valor, clamp0(pagoAc));
+    const cur = acc.get(vid) || { total_pago: 0 };
+    cur.total_pago += pago;
+    acc.set(vid, cur);
+  }
+
+  // 4) Monta resumo final
+  return v.map((row) => {
+    const total = Number(row.total || 0);
+    const total_pago = Number(acc.get(row.venda_id)?.total_pago || 0);
+    const saldo_aberto = clamp0(total - total_pago);
+    return {
+      ...row,
+      total,
+      total_pago: Number(total_pago.toFixed(2)),
+      saldo_aberto: Number(saldo_aberto.toFixed(2)),
+    };
+  });
 }
 
 async function loadParcelas(vendaId) {
   const vid = normId(vendaId);
   const { data, error } = await sb
-    .from("vw_parcelas_detalhe")
-    .select("*")
+    .from("parcelas")
+    .select("id,venda_id,numero,vencimento,valor,status,valor_pago_acumulado,created_at")
     .eq("venda_id", vid)
     .order("numero", { ascending: true });
 
@@ -113,7 +156,7 @@ async function loadParcelas(vendaId) {
   return (data || []).map((r) => ({
     ...r,
     venda_id: normId(r.venda_id),
-    parcela_id: normId(r.parcela_id || r.id), // tenta pegar de qualquer jeito
+    parcela_id: normId(r.id),
   }));
 }
 
@@ -128,6 +171,16 @@ async function registrarPagamentoRPC(payload) {
 ========================= */
 function renderCrediarioLayout() {
   return `
+    <style>
+      /* garante clique/seleção nas linhas */
+      #cTbody tr[data-open] { cursor:pointer; }
+      #cTbody tr[data-open]:hover { filter: brightness(1.08); }
+      #cTbody tr.is-selected { outline: 2px solid rgba(110,168,254,.55); outline-offset:-2px; }
+      .table-wrap { position: relative; pointer-events:auto; }
+      .table { width:100%; border-collapse: collapse; }
+      .table td, .table th { vertical-align: top; }
+    </style>
+
     <div class="row2">
       <div class="card">
         <div class="card-title">Crediário</div>
@@ -179,6 +232,15 @@ function isQuitado(vendaRow) {
   return aberto <= 0.009;
 }
 
+function markSelectedRow(vendaId) {
+  const vid = normId(vendaId);
+  const tbody = document.getElementById("cTbody");
+  if (!tbody) return;
+  tbody.querySelectorAll("tr").forEach((tr) => tr.classList.remove("is-selected"));
+  const tr = tbody.querySelector(`tr[data-open="${CSS.escape(vid)}"]`);
+  if (tr) tr.classList.add("is-selected");
+}
+
 function renderTabelaCred(filtro = "") {
   const info = document.getElementById("cInfo");
   const tbody = document.getElementById("cTbody");
@@ -188,7 +250,7 @@ function renderTabelaCred(filtro = "") {
 
   if (f) {
     rows = rows.filter((r) => {
-      const s = [r.cliente_nome, r.cliente_telefone, r.cliente_endereco, r.endereco].join(" ").toLowerCase();
+      const s = [r.cliente_nome, r.cliente_telefone, r.cliente_endereco].join(" ").toLowerCase();
       return s.includes(f);
     });
   }
@@ -203,8 +265,9 @@ function renderTabelaCred(filtro = "") {
   tbody.innerHTML = rows
     .map((r) => {
       const status = isQuitado(r) ? "Pago ✅" : "Em aberto";
+      const vid = escapeHtml(r.venda_id);
       return `
-        <tr>
+        <tr data-open="${vid}">
           <td>${fmtDateBR(r.data)}</td>
           <td>
             ${escapeHtml(r.cliente_nome || "-")}
@@ -215,16 +278,27 @@ function renderTabelaCred(filtro = "") {
           <td>${money(r.saldo_aberto || 0)}</td>
           <td>${status}</td>
           <td>
-            <button class="btn primary" data-open="${escapeHtml(r.venda_id)}">Abrir</button>
+            <button class="btn primary" data-openbtn="${vid}">Abrir</button>
           </td>
         </tr>
       `;
     })
     .join("");
 
-  tbody.querySelectorAll("button[data-open]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      await abrirVenda(btn.dataset.open);
+  // Clique na LINHA inteira
+  tbody.querySelectorAll("tr[data-open]").forEach((tr) => {
+    tr.addEventListener("click", async () => {
+      const vid = tr.getAttribute("data-open");
+      await abrirVenda(vid);
+    });
+  });
+
+  // Clique no botão (sem “duplo clique”)
+  tbody.querySelectorAll("button[data-openbtn]").forEach((btn) => {
+    btn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await abrirVenda(btn.dataset.openbtn);
     });
   });
 }
@@ -237,14 +311,18 @@ async function abrirVenda(vendaId) {
   state.vendaSelecionada = venda;
   state.paySel = new Set();
 
-  state.parcelas = await loadParcelas(vid);
+  showToast("", "info");
+  markSelectedRow(vid);
+
+  try {
+    state.parcelas = await loadParcelas(vid);
+  } catch (e) {
+    console.error(e);
+    state.parcelas = [];
+    showToast(e?.message || "Erro ao carregar parcelas.", "error");
+  }
 
   renderDetalhes();
-}
-
-function calcParcelaQuitada(p) {
-  const saldo = Number(p.saldo_parcela ?? (Number(p.valor || 0) - Number(p.valor_pago_acumulado || 0)));
-  return saldo <= 0.009;
 }
 
 function renderDetalhes() {
@@ -261,8 +339,7 @@ function renderDetalhes() {
   const pago = Number(venda.total_pago || 0);
   const aberto = Number(venda.saldo_aberto || 0);
 
-  // pega endereço caso a view tenha
-  const endereco = venda.cliente_endereco || venda.endereco || venda.endereco_cliente || "";
+  const endereco = venda.cliente_endereco || "";
 
   const formasOptions = (state.formas || [])
     .map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)
@@ -341,9 +418,9 @@ function renderDetalhes() {
                       const parcela_id = normId(p.parcela_id || p.id);
                       const valor = Number(p.valor || 0);
                       const pagoAc = Number(p.valor_pago_acumulado || 0);
-                      const saldo = Number(p.saldo_parcela ?? (valor - pagoAc));
+                      const saldo = Number((valor - pagoAc).toFixed(2));
                       const quit = saldo <= 0.009;
-                      const status = quit ? "Pago ✅" : (p.status || "Em aberto");
+                      const status = quit ? "Pago ✅" : (p.status || "em_aberto");
 
                       return `
                         <tr>
@@ -373,13 +450,15 @@ function renderDetalhes() {
   `;
 
   // default data hoje
-  document.getElementById("pgData").value = toISODateToday();
+  const elPgData = document.getElementById("pgData");
+  if (elPgData) elPgData.value = toISODateToday();
 
   document.getElementById("btnFecharVenda").addEventListener("click", () => {
     state.vendaSelecionada = null;
     state.parcelas = [];
     state.paySel = new Set();
     box.innerHTML = "Nenhuma venda selecionada.";
+    markSelectedRow(""); // limpa seleção visual
     showToast("", "info");
   });
 
@@ -406,7 +485,6 @@ function renderDetalhes() {
 
     if (!forma) return showToast("Selecione a forma.", "error");
 
-    // monta pagamentos de cada parcela: paga o SALDO da parcela
     const mapParc = new Map((state.parcelas || []).map((p) => [normId(p.parcela_id || p.id), p]));
 
     showToast("Registrando pagamento das parcelas...", "info");
@@ -418,14 +496,13 @@ function renderDetalhes() {
 
         const valor = Number(p.valor || 0);
         const pagoAc = Number(p.valor_pago_acumulado || 0);
-        const saldo = Number(p.saldo_parcela ?? (valor - pagoAc));
+        const saldo = Number((valor - pagoAc).toFixed(2));
 
         if (saldo <= 0.009) continue;
 
-        // chama sua RPC (payload jsonb)
         await registrarPagamentoRPC({
           venda_id: vendaAtual.venda_id,
-          parcela_id,                // ✅ opcional (se sua função usar, perfeito)
+          parcela_id,
           parcela_numero: Number(p.numero || 0),
           data_pagamento,
           valor_pago: Number(saldo.toFixed(2)),
@@ -436,7 +513,7 @@ function renderDetalhes() {
 
       showToast("Parcelas marcadas como pagas ✅", "success");
 
-      // recarrega resumo + reabre venda pra atualizar parcelas
+      // recarrega lista + abre de novo
       state.cred = await loadCrediario();
       renderTabelaCred(document.getElementById("fCred")?.value || "");
       await abrirVenda(vendaAtual.venda_id);
@@ -451,10 +528,10 @@ function renderDetalhes() {
     const vendaAtual = state.vendaSelecionada;
     if (!vendaAtual) return;
 
-    const data_pagamento = document.getElementById("pgData").value;
-    const valor_pago = parseNumberBR(document.getElementById("pgValor").value || "0");
-    const forma = document.getElementById("pgForma").value;
-    const observacoes = document.getElementById("pgObs").value.trim() || null;
+    const data_pagamento = document.getElementById("pgData")?.value || "";
+    const valor_pago = parseNumberBR(document.getElementById("pgValor")?.value || "0");
+    const forma = document.getElementById("pgForma")?.value || "";
+    const observacoes = (document.getElementById("pgObs")?.value || "").trim() || null;
 
     if (!data_pagamento) return showToast("Informe a data do pagamento.", "error");
     if (!valor_pago || valor_pago <= 0) return showToast("Valor inválido.", "error");
@@ -483,31 +560,6 @@ function renderDetalhes() {
 }
 
 /* =========================
-   AUTO-ABERTURA quando vem do VENDAS
-========================= */
-function bindAutoOpenEvent() {
-  if (window.__crediarioAutoBound) return;
-  window.__crediarioAutoBound = true;
-
-  window.addEventListener("openCrediarioVenda", async (ev) => {
-    try {
-      const vendaId = normId(ev?.detail?.vendaId);
-      if (!vendaId) return;
-
-      // se ainda não carregou lista, tenta carregar
-      if (!state.cred?.length) {
-        state.cred = await loadCrediario();
-        renderTabelaCred(document.getElementById("fCred")?.value || "");
-      }
-
-      await abrirVenda(vendaId);
-    } catch (e) {
-      console.error(e);
-    }
-  });
-}
-
-/* =========================
    EXPORT
 ========================= */
 export async function renderCrediario() {
@@ -516,16 +568,17 @@ export async function renderCrediario() {
 
     setTimeout(async () => {
       try {
-        bindAutoOpenEvent();
-
         state.formas = await loadFormasEnum();
         state.cred = await loadCrediario();
 
         renderTabelaCred("");
 
-        document.getElementById("fCred").addEventListener("input", (e) => {
-          renderTabelaCred(e.target.value);
-        });
+        const f = document.getElementById("fCred");
+        if (f) {
+          f.addEventListener("input", (e) => {
+            renderTabelaCred(e.target.value);
+          });
+        }
       } catch (e) {
         console.error(e);
         showToast(e?.message || "Erro ao iniciar Crediário.", "error");
