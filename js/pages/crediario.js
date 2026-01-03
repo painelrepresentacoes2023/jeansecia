@@ -47,8 +47,7 @@ function normId(v) {
   return String(v).trim();
 }
 
-// ✅ “apelido” pra nunca mais quebrar se escapar normId em algum lugar
-const normId = normId;
+// ❌ REMOVIDO: const normId = normId;  (isso quebrava tudo)
 
 function clamp0(n) {
   const x = Number(n || 0);
@@ -295,7 +294,7 @@ function renderCrediarioLayout() {
             <div class="cModalTitle" id="cModalTitle">Detalhes</div>
             <div class="small" id="cModalSub">—</div>
           </div>
-          <button class="btn" id="cModalClose">Fechar</button>
+          <button class="btn" id="cModalClose" type="button">Fechar</button>
         </div>
         <div id="cModalBody" class="small">Carregando...</div>
       </div>
@@ -322,10 +321,10 @@ function renderTabelaCred(filtro = "") {
     });
   }
 
-  info.textContent = `${rows.length} venda(s) no crediário.`;
+  if (info) info.textContent = `${rows.length} venda(s) no crediário.`;
 
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="small">Nenhuma venda encontrada.</td></tr>`;
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="small">Nenhuma venda encontrada.</td></tr>`;
     return;
   }
 
@@ -344,7 +343,7 @@ function renderTabelaCred(filtro = "") {
           <td>${money(r.total_pago || 0)}</td>
           <td>${money(r.saldo_aberto || 0)}</td>
           <td>${status}</td>
-          <td><button class="btn primary" data-open="${vid}">Ver detalhes</button></td>
+          <td><button class="btn primary" data-open="${vid}" type="button">Ver detalhes</button></td>
         </tr>
       `;
     })
@@ -353,6 +352,7 @@ function renderTabelaCred(filtro = "") {
   tbody.querySelectorAll("button[data-open]").forEach((btn) => {
     btn.addEventListener("click", async (ev) => {
       ev.preventDefault();
+      ev.stopPropagation();
       await abrirModalVenda(btn.dataset.open);
     });
   });
@@ -512,7 +512,7 @@ function renderModalDetalhes() {
                             ${
                               quit
                                 ? `<span class="small">—</span>`
-                                : `<button class="btn primary" data-pay="${escapeHtml(pid)}">Marcar como paga</button>`
+                                : `<button class="btn primary" data-pay="${escapeHtml(pid)}" type="button">Marcar como paga</button>`
                             }
                           </td>
                         </tr>
@@ -533,7 +533,10 @@ function renderModalDetalhes() {
   const modalMsg = body.querySelector("#modalMsg");
 
   tbody?.querySelectorAll("button[data-pay]")?.forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+
       const parcelaId = normId(btn.dataset.pay);
       const parcela = (state.parcelas || []).find((x) => normId(x.parcela_id || x.id) === parcelaId);
       if (!parcela) return;
