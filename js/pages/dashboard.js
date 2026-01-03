@@ -17,6 +17,7 @@ function money(n) {
   return v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+/** Corrige DATE (YYYY-MM-DD) sem voltar 1 dia */
 function fmtDateBR(iso) {
   if (!iso) return "-";
   const s = String(iso).slice(0, 10);
@@ -40,15 +41,10 @@ function endOfDayISO(d = new Date()) {
 function addDaysDateOnly(days) {
   const d = new Date();
   d.setDate(d.getDate() + days);
-  // yyyy-mm-dd
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   const dd = String(d.getDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
-}
-
-function byNum(a, b) {
-  return Number(a || 0) - Number(b || 0);
 }
 
 async function safeQuery(fn) {
@@ -58,47 +54,41 @@ async function safeQuery(fn) {
     return res?.data ?? [];
   } catch (e) {
     console.warn(e);
-    return null; // sinaliza que falhou
+    return null;
   }
 }
 
-/* tenta várias listas de colunas (pra não quebrar se faltar alguma) */
+/* tenta vários selects, para não quebrar */
 async function safeSelect(table, selectTries, buildQuery) {
   for (const sel of selectTries) {
     const data = await safeQuery(() => buildQuery(sb.from(table).select(sel)));
-    if (data !== null) return { data, used: sel, ok: true };
+    if (data !== null) return { ok: true, data, used: sel };
   }
-  return { data: [], used: null, ok: false };
+  return { ok: false, data: [], used: null };
 }
 
 /* =========================
-   RENDER
+   UI (layout)
 ========================= */
 function layout() {
   return `
-    <div class="grid cols-4">
-      <div class="card" id="cardVendasHoje">
+    <div class="grid cols-3">
+      <div class="card">
         <div class="card-title">Vendas Hoje</div>
         <div class="card-sub">Resumo por data</div>
         <div class="small" id="vHojeMsg" style="margin-top:10px;">Carregando...</div>
       </div>
 
-      <div class="card" id="cardCrediario">
+      <div class="card">
         <div class="card-title">Crediário</div>
         <div class="card-sub">Vencidas e a vencer</div>
         <div class="small" id="credMsg" style="margin-top:10px;">Carregando...</div>
       </div>
 
-      <div class="card" id="cardEstoque">
+      <div class="card">
         <div class="card-title">Estoque Baixo</div>
         <div class="card-sub">Itens abaixo do mínimo</div>
         <div class="small" id="estMsg" style="margin-top:10px;">Carregando...</div>
-      </div>
-
-      <div class="card" id="cardCompras">
-        <div class="card-title">Compras</div>
-        <div class="card-sub">Últimas entradas</div>
-        <div class="small" id="compMsg" style="margin-top:10px;">Carregando...</div>
       </div>
     </div>
 
@@ -123,83 +113,80 @@ function layout() {
       </div>
 
       <div class="card">
-        <div class="card-title">Atalhos</div>
-        <div class="card-sub">Nova venda / Nova compra / Novo produto</div>
-
-        <div style="margin-top:12px; display:flex; gap:10px; flex-wrap:wrap;">
-          <button class="btn primary" id="goVendas">Ir para Vendas</button>
-          <button class="btn" id="goCompras">Ir para Compras</button>
-          <button class="btn" id="goProdutos">Ir para Produtos</button>
-          <button class="btn" id="goCred">Ir para Crediário</button>
-        </div>
-
-        <div class="small" style="margin-top:10px; opacity:.85;">
-          Dica: use os atalhos pra cadastrar rapidão.
+        <div class="card-title">Resumo rápido</div>
+        <div class="card-sub">Visão geral</div>
+        <div class="small" style="margin-top:12px; opacity:.85;">
+          • Vendas hoje<br/>
+          • Parcelas do crediário (vencidas / próximas)<br/>
+          • Produtos abaixo do mínimo
         </div>
       </div>
     </div>
   `;
 }
 
+function setHtml(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
 /* =========================
-   LOADERS (DADOS)
+   LOADERS (dados)
 ========================= */
 async function loadVendasHoje() {
-  // tenta data como timestamp ou date; a query com gte/lte funciona em ambos na maioria dos casos
   const start = startOfDayISO(new Date());
   const end = endOfDayISO(new Date());
 
-  const tries = [
-    "id,data,total",
-    "id,data,total,forma",
-    "id,created_at,total",
-  ];
-
-  const { data, ok, used } = await safeSelect(
+  // tenta por "data"
+  let r = await safeSelect(
     "vendas",
-    tries,
-    (q) => q.gte("data", start).lte("data", end).order("data", { ascending: false }).limit(500)
+    ["id,data,total", "id,data,total,forma", "id,created_at,total"],
+    (q) => q.gte("data", start).lte("data", end).limit(2000)
   );
 
-  // se falhou com "data", tenta com created_at
-  if (!ok || !used?.includes("data")) {
-    const alt = await safeSelect(
+  // fallback: created_at
+  if (!r.ok || !(r.used || "").includes("data")) {
+    r = await safeSelect(
       "vendas",
       ["id,created_at,total", "id,created_at,total,forma"],
-      (q) => q.gte("created_at", start).lte("created_at", end).order("created_at", { ascending: false }).limit(500)
+      (q) => q.gte("created_at", start).lte("created_at", end).limit(2000)
     );
-    return alt.data || [];
   }
 
-  return data || [];
+  return r.ok ? r.data : null;
+}
+
+/* pega enum de formas (igual você fez no crediário.js) */
+async function loadCrediFormas() {
+  const vals = await safeQuery(() => sb.rpc("enum_values", { enum_type: "forma_pagamento" }));
+  if (vals === null) return ["crediario", "crediário", "credi"];
+  const filtered = (vals || [])
+    .map((x) => x.value)
+    .filter((v) => String(v).toLowerCase().includes("credi"));
+  return filtered.length ? filtered : ["crediario", "crediário", "credi"];
 }
 
 async function loadCrediarioResumo() {
-  // 1) pega vendas do crediário (forma contém "credi")
-  const vendas = await safeQuery(() =>
-    sb
-      .from("vendas")
-      .select("id,forma,total")
-      .in("forma", ["crediario", "crediário", "credi"]) // se sua forma for enum, isso funciona
-  );
+  const crediFormas = await loadCrediFormas();
 
-  // se não existir enum/valores, tenta fallback por igualdade
+  // 1) vendas do crediário
+  const vendas = await safeQuery(() =>
+    sb.from("vendas").select("id,forma,total").in("forma", crediFormas).limit(2000)
+  );
   const vendasOk = Array.isArray(vendas) ? vendas : [];
   const vendaIds = vendasOk.map((v) => String(v.id)).filter(Boolean);
+  if (!vendaIds.length) return { vencidas: [], proximas: [], totalAberto: 0, totalVencidas: 0, totalProximas: 0 };
 
-  if (!vendaIds.length) return { vencidas: [], proximas: [], totalAberto: 0 };
-
-  // 2) busca parcelas dessas vendas
+  // 2) parcelas dessas vendas
   const parcelas = await safeQuery(() =>
     sb
       .from("parcelas")
       .select("id,venda_id,vencimento,valor,valor_pago_acumulado,status,numero")
       .in("venda_id", vendaIds)
-      .order("vencimento", { ascending: true })
-      .limit(2000)
+      .limit(5000)
   );
-
   const parc = Array.isArray(parcelas) ? parcelas : [];
+
   const hoje = addDaysDateOnly(0);
   const limite = addDaysDateOnly(7);
 
@@ -221,99 +208,89 @@ async function loadCrediarioResumo() {
   });
 
   const totalAberto = emAberto.reduce((s, p) => s + Number(p.saldo || 0), 0);
+  const totalVencidas = vencidas.reduce((s, p) => s + Number(p.saldo || 0), 0);
+  const totalProximas = proximas.reduce((s, p) => s + Number(p.saldo || 0), 0);
 
-  return { vencidas, proximas, totalAberto };
+  return { vencidas, proximas, totalAberto, totalVencidas, totalProximas };
 }
 
+/* Estoque baixo: tenta várias combinações de nomes */
 async function loadEstoqueBaixo() {
-  // tenta colunas comuns
+  // tenta tabela produtos
   const tries = [
     "id,nome,estoque,estoque_minimo",
     "id,nome,quantidade,estoque_minimo",
-    "id,nome,estoque_atual,estoque_minimo",
+    "id,nome,quantidade_atual,estoque_minimo",
+    "id,nome,qtd,estoque_minimo",
+    "id,nome,estoque,minimo",
+    "id,nome,quantidade,minimo",
+    "id,nome,qtd,minimo",
     "id,descricao,estoque,estoque_minimo",
+    "id,descricao,quantidade,minimo",
   ];
 
-  const result = await safeSelect(
-    "produtos",
-    tries,
-    (q) => q.limit(1000)
-  );
+  const r = await safeSelect("produtos", tries, (q) => q.limit(5000));
+  if (!r.ok) return null;
 
-  if (!result.ok) return null;
+  const rows = r.data || [];
+  if (!rows.length) return [];
 
-  const rows = result.data || [];
-  // detecta quais campos vieram
-  const sample = rows[0] || {};
-  const nomeKey = sample.nome != null ? "nome" : (sample.descricao != null ? "descricao" : "nome");
-  const estKey =
-    sample.estoque != null ? "estoque" :
-    (sample.quantidade != null ? "quantidade" :
-    (sample.estoque_atual != null ? "estoque_atual" : "estoque"));
+  // descobre chaves existentes no sample
+  const s = rows[0] || {};
+
+  const nomeKey = s.nome != null ? "nome" : (s.descricao != null ? "descricao" : "nome");
+
+  const estoqueKey =
+    s.estoque != null ? "estoque" :
+    (s.quantidade_atual != null ? "quantidade_atual" :
+    (s.quantidade != null ? "quantidade" :
+    (s.qtd != null ? "qtd" : "estoque")));
+
+  const minimoKey =
+    s.estoque_minimo != null ? "estoque_minimo" :
+    (s.minimo != null ? "minimo" :
+    (s.min_estoque != null ? "min_estoque" : "estoque_minimo"));
 
   const out = rows
-    .map((r) => {
-      const est = Number(r[estKey] || 0);
-      const min = Number(r.estoque_minimo || 0);
-      return { id: r.id, nome: r[nomeKey], est, min };
+    .map((p) => {
+      const est = Number(p[estoqueKey] ?? 0);
+      const min = Number(p[minimoKey] ?? 0);
+      return { id: p.id, nome: p[nomeKey], est, min };
     })
-    .filter((x) => Number.isFinite(x.min) && x.min > 0 && x.est <= x.min)
-    .sort((a, b) => byNum(a.est, b.est))
+    .filter((x) => Number.isFinite(x.min) && x.min > 0 && Number.isFinite(x.est) && x.est <= x.min)
+    .sort((a, b) => (a.est - b.est))
     .slice(0, 12);
 
   return out;
 }
 
-async function loadComprasRecentes() {
-  const tries = [
-    "id,data,total,fornecedor",
-    "id,data,total",
-    "id,created_at,total,fornecedor",
-    "id,created_at,total",
-  ];
-
-  // tenta por data; se der ruim, tenta por created_at
-  let r = await safeSelect("compras", tries, (q) => q.order("data", { ascending: false }).limit(5));
-  if (!r.ok) {
-    r = await safeSelect("compras", ["id,created_at,total,fornecedor", "id,created_at,total"], (q) =>
-      q.order("created_at", { ascending: false }).limit(5)
-    );
-  }
-  return r.ok ? (r.data || []) : null;
-}
-
 async function loadRelatorioPeriodo(inicioYYYYMMDD, fimYYYYMMDD) {
-  // usa data >= inicio e <= fim (DATE) ou timestamps (funciona bem na prática)
   const ini = `${inicioYYYYMMDD}T00:00:00.000Z`;
   const fim = `${fimYYYYMMDD}T23:59:59.999Z`;
 
-  // tenta por data; fallback created_at
-  let data = await safeQuery(() =>
-    sb.from("vendas").select("id,total,data").gte("data", ini).lte("data", fim).limit(5000)
+  // tenta por "data"
+  let rows = await safeQuery(() =>
+    sb.from("vendas").select("id,total,data").gte("data", ini).lte("data", fim).limit(10000)
   );
 
-  if (data === null) {
-    data = await safeQuery(() =>
-      sb.from("vendas").select("id,total,created_at").gte("created_at", ini).lte("created_at", fim).limit(5000)
+  // fallback created_at
+  if (rows === null) {
+    rows = await safeQuery(() =>
+      sb.from("vendas").select("id,total,created_at").gte("created_at", ini).lte("created_at", fim).limit(10000)
     );
   }
 
-  const rows = Array.isArray(data) ? data : [];
-  const qtd = rows.length;
-  const total = rows.reduce((s, r) => s + Number(r.total || 0), 0);
+  const list = Array.isArray(rows) ? rows : [];
+  const qtd = list.length;
+  const total = list.reduce((s, r) => s + Number(r.total || 0), 0);
   const ticket = qtd ? total / qtd : 0;
 
   return { qtd, total, ticket };
 }
 
 /* =========================
-   UI UPDATE
+   FILL UI
 ========================= */
-function setHtml(id, html) {
-  const el = document.getElementById(id);
-  if (el) el.innerHTML = html;
-}
-
 async function fillDashboard() {
   // Vendas Hoje
   const vendasHoje = await loadVendasHoje();
@@ -336,8 +313,8 @@ async function fillDashboard() {
   } else {
     setHtml(
       "credMsg",
-      `<div class="small"><b>Vencidas:</b> ${cred.vencidas.length} parcela(s)</div>
-       <div class="small"><b>Próx. 7 dias:</b> ${cred.proximas.length} parcela(s)</div>
+      `<div class="small"><b>Vencidas:</b> ${cred.vencidas.length} • <b>${money(cred.totalVencidas)}</b></div>
+       <div class="small"><b>Próx. 7 dias:</b> ${cred.proximas.length} • <b>${money(cred.totalProximas)}</b></div>
        <div style="margin-top:8px; font-weight:900; font-size:1.05rem;">Aberto: ${money(cred.totalAberto)}</div>`
     );
   }
@@ -345,7 +322,11 @@ async function fillDashboard() {
   // Estoque baixo
   const baixo = await loadEstoqueBaixo();
   if (baixo === null) {
-    setHtml("estMsg", "Tabela de produtos não encontrada ou colunas diferentes.");
+    setHtml(
+      "estMsg",
+      `Não encontrei a tabela <b>produtos</b> ou as colunas de estoque/min.<br/>
+       (Me diga o nome da tabela/colunas que eu ajusto em 1 minuto.)`
+    );
   } else if (!baixo.length) {
     setHtml("estMsg", "Nenhum item abaixo do mínimo ✅");
   } else {
@@ -365,38 +346,9 @@ async function fillDashboard() {
        </div>`
     );
   }
-
-  // Compras recentes
-  const compras = await loadComprasRecentes();
-  if (compras === null) {
-    setHtml("compMsg", "Tabela de compras não encontrada (ou colunas diferentes).");
-  } else if (!compras.length) {
-    setHtml("compMsg", "Nenhuma compra registrada ainda.");
-  } else {
-    const first = compras[0] || {};
-    const hasData = first.data != null;
-    const hasCreated = first.created_at != null;
-
-    setHtml(
-      "compMsg",
-      `<div class="small" style="display:grid; gap:8px;">
-        ${compras
-          .map((c) => {
-            const dt = hasData ? c.data : (hasCreated ? c.created_at : null);
-            const forn = c.fornecedor ? ` • ${escapeHtml(c.fornecedor)}` : "";
-            return `<div style="display:flex; justify-content:space-between; gap:10px;">
-              <span>${fmtDateBR(dt)}${forn}</span>
-              <b>${money(c.total || 0)}</b>
-            </div>`;
-          })
-          .join("")}
-      </div>`
-    );
-  }
 }
 
-function bindDashboardActions() {
-  // defaults período: últimos 7 dias
+function bindPeriodo() {
   const ini = document.getElementById("rpIni");
   const fim = document.getElementById("rpFim");
   const out = document.getElementById("rpOut");
@@ -410,36 +362,20 @@ function bindDashboardActions() {
   btn?.addEventListener("click", async () => {
     const i = ini?.value;
     const f = fim?.value;
-    if (!i || !f) {
-      if (out) out.textContent = "Selecione início e fim.";
-      return;
-    }
-    if (i > f) {
-      if (out) out.textContent = "Início não pode ser maior que fim.";
-      return;
-    }
 
-    if (out) out.textContent = "Carregando relatório...";
+    if (!i || !f) return (out.textContent = "Selecione início e fim.");
+    if (i > f) return (out.textContent = "Início não pode ser maior que fim.");
+
+    out.textContent = "Carregando relatório...";
     const r = await loadRelatorioPeriodo(i, f);
-    if (!r) {
-      if (out) out.textContent = "Erro ao carregar relatório.";
-      return;
-    }
+    if (!r) return (out.textContent = "Erro ao carregar relatório.");
 
-    if (out) {
-      out.innerHTML = `
-        <div class="small"><b>Período:</b> ${fmtDateBR(i)} → ${fmtDateBR(f)}</div>
-        <div style="margin-top:8px; font-weight:900; font-size:1.15rem;">${money(r.total)}</div>
-        <div class="small" style="opacity:.9;">${r.qtd} venda(s) • Ticket médio ${money(r.ticket)}</div>
-      `;
-    }
+    out.innerHTML = `
+      <div class="small"><b>Período:</b> ${fmtDateBR(i)} → ${fmtDateBR(f)}</div>
+      <div style="margin-top:8px; font-weight:900; font-size:1.15rem;">${money(r.total)}</div>
+      <div class="small" style="opacity:.9;">${r.qtd} venda(s) • Ticket médio ${money(r.ticket)}</div>
+    `;
   });
-
-  // Atalhos (hash)
-  document.getElementById("goVendas")?.addEventListener("click", () => (location.hash = "#vendas"));
-  document.getElementById("goCompras")?.addEventListener("click", () => (location.hash = "#compras"));
-  document.getElementById("goProdutos")?.addEventListener("click", () => (location.hash = "#produtos"));
-  document.getElementById("goCred")?.addEventListener("click", () => (location.hash = "#crediario"));
 }
 
 /* =========================
@@ -450,15 +386,13 @@ export async function renderDashboard() {
 
   setTimeout(async () => {
     try {
-      bindDashboardActions();
+      bindPeriodo();
       await fillDashboard();
     } catch (e) {
       console.error(e);
-      // não trava a tela
       setHtml("vHojeMsg", "Erro ao carregar.");
       setHtml("credMsg", "Erro ao carregar.");
       setHtml("estMsg", "Erro ao carregar.");
-      setHtml("compMsg", "Erro ao carregar.");
     }
   }, 0);
 
