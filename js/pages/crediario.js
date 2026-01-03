@@ -25,20 +25,21 @@ function money(n) {
 
 function fmtDateBR(iso) {
   if (!iso) return "-";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toLocaleDateString("pt-BR");
+
+  // Se vier "YYYY-MM-DD" (tipo DATE do Postgres), cria data LOCAL (sem UTC)
+  const s = String(iso).slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y, m, d] = s.split("-").map(Number);
+    const dt = new Date(y, m - 1, d); // local
+    return dt.toLocaleDateString("pt-BR");
+  }
+
+  // Se vier timestamptz/iso completo, usa normal
+  const d2 = new Date(iso);
+  if (Number.isNaN(d2.getTime())) return String(iso);
+  return d2.toLocaleDateString("pt-BR");
 }
 
-function normId(v) {
-  if (v == null) return "";
-  return String(v).trim();
-}
-
-function clamp0(n) {
-  const x = Number(n || 0);
-  return x < 0 ? 0 : x;
-}
 
 /* =========================
    STATE
@@ -523,6 +524,35 @@ function renderModalDetalhes() {
     </div>
   `;
 
+function bindModalOnce() {
+  if (window.__credModalBound) return;
+  window.__credModalBound = true;
+
+  // Delegação: funciona mesmo se o botão for recriado/re-render
+  document.addEventListener("click", (ev) => {
+    const t = ev.target;
+
+    // botão fechar
+    if (t && t.id === "cModalClose") {
+      ev.preventDefault();
+      closeModal();
+      return;
+    }
+
+    // clicou no backdrop (fora do modal)
+    const backdrop = document.getElementById("cModalBackdrop");
+    if (backdrop && t === backdrop) {
+      closeModal();
+    }
+  });
+
+  // ESC fecha
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closeModal();
+  });
+}
+
+   
   // bind botões "Marcar como paga"
   const tbody = body.querySelector("#parcTbody");
   const modalMsg = body.querySelector("#modalMsg");
