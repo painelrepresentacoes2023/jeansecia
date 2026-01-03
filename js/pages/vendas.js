@@ -242,15 +242,42 @@ function renderVendasLayout() {
         </div>
 
         <div class="grid grid-2" style="margin-top:12px; gap:10px;">
-          <div class="field">
-            <label>Data/Hora</label>
-            <input class="input" id="vData" type="datetime-local" />
-          </div>
-          <div class="field">
-            <label>Forma</label>
-            <select class="select" id="vForma"></select>
-          </div>
-        </div>
+  <div class="field">
+    <label>Data/Hora</label>
+    <input class="input" id="vData" type="datetime-local" />
+  </div>
+
+  <div class="field">
+    <label>Forma</label>
+    <select class="select" id="vForma"></select>
+  </div>
+</div>
+
+<!-- campos extras só pro crediário -->
+<div id="boxCrediario" style="display:none; margin-top:10px;">
+  <div class="grid grid-2" style="gap:10px;">
+    <div class="field">
+      <label>Parcelas</label>
+      <select class="select" id="vParcelas">
+        ${Array.from({ length: 24 }, (_, i) => i + 1)
+          .map(n => `<option value="${n}">${n}x</option>`)
+          .join("")}
+      </select>
+      <div class="small" id="vParcelaInfo" style="margin-top:6px;"></div>
+    </div>
+
+    <div class="field">
+      <label>Dia do vencimento</label>
+      <select class="select" id="vDiaVenc">
+        ${Array.from({ length: 28 }, (_, i) => i + 1)
+          .map(n => `<option value="${n}" ${n === 10 ? "selected" : ""}>Dia ${n}</option>`)
+          .join("")}
+      </select>
+      <div class="small" style="margin-top:6px;">Padrão: dia 10</div>
+    </div>
+  </div>
+</div>
+
 
         <div class="grid grid-2" style="margin-top:10px; gap:10px;">
           <div class="field">
@@ -584,6 +611,33 @@ function renderItensVenda() {
   updateResumoOnly();
 }
 
+function isCrediarioForma(forma) {
+  return String(forma || "").toLowerCase().includes("credi");
+}
+
+function updateCrediarioInfo() {
+  const box = document.getElementById("boxCrediario");
+  const info = document.getElementById("vParcelaInfo");
+  const forma = document.getElementById("vForma")?.value || "";
+
+  if (!box || !info) return;
+
+  if (!isCrediarioForma(forma)) {
+    box.style.display = "none";
+    info.textContent = "";
+    return;
+  }
+
+  box.style.display = "block";
+
+  const { total } = calcResumoVenda();
+  const n = Number(document.getElementById("vParcelas")?.value || 1);
+  const parcela = n > 0 ? (Number(total || 0) / n) : 0;
+
+  info.textContent = `Parcela estimada: ${money(parcela)}`;
+}
+
+
 /* =========================
    RPC (SALVAR/EDITAR)
 ========================= */
@@ -839,6 +893,21 @@ function bindVendas() {
   selForma.innerHTML = (state.formas || [])
     .map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`)
     .join("");
+
+   // quando mudar forma, mostra/esconde crediário
+document.getElementById("vForma")?.addEventListener("change", () => {
+  updateCrediarioInfo();
+});
+
+// quando mexer em parcelas/dia, atualiza info
+document.getElementById("vParcelas")?.addEventListener("change", updateCrediarioInfo);
+document.getElementById("vDiaVenc")?.addEventListener("change", updateCrediarioInfo);
+
+// quando mudar desconto, recalcula parcela
+document.getElementById("vDesconto")?.addEventListener("input", () => {
+  updateResumoOnly();
+  updateCrediarioInfo();
+});
 
   // filtro histórico
   document.getElementById("hVendaFiltro")?.addEventListener(
